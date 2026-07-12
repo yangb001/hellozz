@@ -12,6 +12,10 @@ def mock_buffer():
     """Mock BufferMemory."""
     buf = AsyncMock()
     buf.get_recent = AsyncMock(return_value="recent messages")
+    buf.get_recent_messages = MagicMock(return_value=[
+        Message(role="user", content="recent message 1"),
+        Message(role="assistant", content="recent message 2"),
+    ])
     buf.add = AsyncMock()
     buf.clear = AsyncMock()
     return buf
@@ -252,17 +256,20 @@ class TestMemoryManagerExtractLongTerm:
     async def test_extract_gets_recent_messages(self, manager, mock_buffer):
         mock_extractor = manager.extractor
         mock_extractor.extract.return_value = []
-        mock_buffer.get_recent.return_value = "recent"
 
         await manager.extract_long_term("s1")
-        mock_buffer.get_recent.assert_awaited_once_with("s1", n=20)
+        mock_buffer.get_recent_messages.assert_called_once_with("s1", n=20)
 
     @pytest.mark.asyncio
-    async def test_extract_calls_extractor(self, manager, mock_buffer, mock_extractor):
-        mock_buffer.get_recent.return_value = "recent msgs"
+    async def test_extract_calls_extractor_with_message_objects(self, manager, mock_buffer, mock_extractor):
         mock_extractor.extract.return_value = []
         await manager.extract_long_term("s1")
-        mock_extractor.extract.assert_awaited_once_with("recent msgs")
+        # Verify extract was called with a list (the return of get_recent_messages)
+        call_args = mock_extractor.extract.call_args
+        arg = call_args[0][0]
+        assert isinstance(arg, list)
+        for item in arg:
+            assert isinstance(item, Message)
 
     @pytest.mark.asyncio
     async def test_extract_stores_facts_in_vector(

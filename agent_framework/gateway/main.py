@@ -9,6 +9,9 @@ from typing import AsyncGenerator, Dict, Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import os
 
 from .dependencies import set_session_manager, clear_session_manager
 from ..core.session_manager import SessionManager
@@ -196,6 +199,16 @@ def create_app() -> FastAPI:
 
     from .api.websocket import router as ws_router
     app.include_router(ws_router)
+
+    # Serve static files
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    if os.path.exists(static_dir):
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+        @app.get("/")
+        async def root():
+            """Serve the main web interface."""
+            return FileResponse(os.path.join(static_dir, "index.html"))
 
     return app
 

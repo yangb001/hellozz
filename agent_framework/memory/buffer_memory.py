@@ -60,6 +60,26 @@ class BufferMemory(BaseMemory):
         recent = messages[-n:]
         return "\n".join(m.content for m in recent)
 
+    def get_recent_messages(self, session_id: str, n: int = 20) -> List[Message]:
+        """Get the most recent n Message objects from the buffer.
+
+        Unlike get_recent(), this returns the original Message objects
+        preserving all fields (role, content, sender_id, timestamp),
+        which is needed for operations like memory extraction that
+        require access to message metadata.
+
+        Args:
+            session_id: Unique identifier for the session.
+            n: Number of recent messages to retrieve. Defaults to 20.
+
+        Returns:
+            List of Message objects, or empty list if no messages exist.
+        """
+        messages = self.buffers.get(session_id, [])
+        if not messages:
+            return []
+        return list(messages[-n:])
+
     async def save(self, session_id: str, message: Message) -> None:
         """Save a message (delegates to add).
 

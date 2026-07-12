@@ -137,7 +137,7 @@ class MemoryManager(BaseMemory):
             force: If True, force extraction (currently unused, reserved for
                    future conditional logic).
         """
-        recent = await self.short_term.get_recent(session_id, n=20)
+        recent = self.short_term.get_recent_messages(session_id, n=20)
         facts = await self.extractor.extract(recent)
 
         for fact in facts:

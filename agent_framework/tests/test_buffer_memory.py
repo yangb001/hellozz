@@ -186,6 +186,67 @@ class TestBufferMemoryBaseMemoryInterface:
         await buffer.extract_long_term("s1", force=True)
 
 
+class TestBufferMemoryGetRecentMessages:
+    """Test BufferMemory.get_recent_messages method."""
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_returns_list_of_message(self, buffer, sample_messages):
+        for msg in sample_messages:
+            await buffer.add("s1", msg)
+        result = buffer.get_recent_messages("s1")
+        assert isinstance(result, list)
+        assert len(result) == len(sample_messages)
+        for item in result:
+            assert isinstance(item, Message)
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_returns_correct_messages(self, buffer, sample_messages):
+        for msg in sample_messages:
+            await buffer.add("s1", msg)
+        result = buffer.get_recent_messages("s1")
+        assert result[0].content == "Hello, how are you?"
+        assert result[-1].content == "Tell me a joke."
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_limits_n(self, buffer, sample_messages):
+        for msg in sample_messages:
+            await buffer.add("s1", msg)
+        result = buffer.get_recent_messages("s1", n=2)
+        assert len(result) == 2
+        assert result[0].content == "It's sunny and warm."
+        assert result[1].content == "Tell me a joke."
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_empty_session(self, buffer):
+        result = buffer.get_recent_messages("nonexistent")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_n_greater_than_available(self, buffer):
+        msg = Message(role="user", content="Only message")
+        await buffer.add("s1", msg)
+        result = buffer.get_recent_messages("s1", n=100)
+        assert len(result) == 1
+        assert result[0].content == "Only message"
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_preserves_sender_id(self, buffer):
+        msg = Message(role="user", content="Hello", sender_id="user123")
+        await buffer.add("s1", msg)
+        result = buffer.get_recent_messages("s1")
+        assert result[0].sender_id == "user123"
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_preserves_all_fields(self, buffer):
+        msg = Message(role="assistant", content="Hi there", sender_id="agent1")
+        await buffer.add("s1", msg)
+        result = buffer.get_recent_messages("s1")
+        assert result[0].role == "assistant"
+        assert result[0].content == "Hi there"
+        assert result[0].sender_id == "agent1"
+        assert result[0].timestamp is not None
+
+
 class TestBufferMemoryIsolation:
     """Test session isolation in BufferMemory."""
 

@@ -138,7 +138,7 @@ class TestSaveMethod:
         mm, short, long, extractor = _make_memory_manager(trigger="smart")
         extractor.is_important = AsyncMock(return_value=True)
         extractor.extract = AsyncMock(return_value=[])
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
         msg = _make_message("important info")
 
         await mm.save("sess1", msg)
@@ -163,7 +163,7 @@ class TestSaveMethod:
         """every_n_turns 策略下，达到阈值时应触发提取。"""
         mm, short, long, extractor = _make_memory_manager(trigger="every_n_turns", every_n=3)
         extractor.extract = AsyncMock(return_value=[])
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
 
         for i in range(3):
             await mm.save("sess1", _make_message(f"msg {i}"))
@@ -176,7 +176,7 @@ class TestSaveMethod:
         """every_n_turns 策略下，触发后计数器应重置。"""
         mm, short, long, extractor = _make_memory_manager(trigger="every_n_turns", every_n=2)
         extractor.extract = AsyncMock(return_value=[])
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
 
         await mm.save("sess1", _make_message("msg1"))
         assert mm._turn_counter["sess1"] == 1
@@ -189,7 +189,7 @@ class TestSaveMethod:
         """every_n_turns 策略下，未达阈值时不触发提取。"""
         mm, short, long, extractor = _make_memory_manager(trigger="every_n_turns", every_n=5)
         extractor.extract = AsyncMock(return_value=[])
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
 
         for i in range(4):
             await mm.save("sess1", _make_message(f"msg {i}"))
@@ -201,7 +201,7 @@ class TestSaveMethod:
         """every_n_turns 策略下，计数器应按会话独立追踪。"""
         mm, short, long, extractor = _make_memory_manager(trigger="every_n_turns", every_n=2)
         extractor.extract = AsyncMock(return_value=[])
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
 
         await mm.save("sess1", _make_message("msg1"))
         await mm.save("sess2", _make_message("msg2"))
@@ -370,29 +370,30 @@ class TestExtractLongTerm:
     async def test_extract_gets_recent_messages(self):
         """extract_long_term 应获取最近 20 条消息。"""
         mm, short, long, extractor = _make_memory_manager()
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
         extractor.extract = AsyncMock(return_value=[])
 
         await mm.extract_long_term("sess1")
 
-        short.get_recent.assert_awaited_once_with("sess1", n=20)
+        short.get_recent_messages.assert_called_once_with("sess1", n=20)
 
     @pytest.mark.asyncio
     async def test_extract_calls_extractor(self):
         """extract_long_term 应调用 extractor.extract。"""
         mm, short, long, extractor = _make_memory_manager()
-        short.get_recent = AsyncMock(return_value="recent messages")
+        msgs = [_make_message("recent message 1"), _make_message("recent message 2")]
+        short.get_recent_messages = MagicMock(return_value=msgs)
         extractor.extract = AsyncMock(return_value=[])
 
         await mm.extract_long_term("sess1")
 
-        extractor.extract.assert_awaited_once_with("recent messages")
+        extractor.extract.assert_awaited_once_with(msgs)
 
     @pytest.mark.asyncio
     async def test_extract_adds_facts_to_long_term(self):
         """extract_long_term 应将提取的事实添加到长期记忆。"""
         mm, short, long, extractor = _make_memory_manager()
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
         facts = [
             MemoryFact(content="fact1", metadata={"type": "preference"}),
             MemoryFact(content="fact2", metadata={"type": "info"}),
@@ -409,7 +410,7 @@ class TestExtractLongTerm:
     async def test_extract_adds_user_facts(self):
         """有 user_id 的事实应同时写入用户记忆。"""
         mm, short, long, extractor = _make_memory_manager()
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
         facts = [
             MemoryFact(content="user fact", metadata={}, user_id="user1"),
         ]
@@ -424,7 +425,7 @@ class TestExtractLongTerm:
     async def test_extract_no_user_facts_skips_add_user(self):
         """没有 user_id 的事实不应调用 add_user。"""
         mm, short, long, extractor = _make_memory_manager()
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
         facts = [
             MemoryFact(content="general fact", metadata={}),
         ]
@@ -439,7 +440,7 @@ class TestExtractLongTerm:
     async def test_extract_empty_facts(self):
         """无提取事实时不应调用 long_term.add。"""
         mm, short, long, extractor = _make_memory_manager()
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
         extractor.extract = AsyncMock(return_value=[])
 
         await mm.extract_long_term("sess1")
@@ -451,7 +452,7 @@ class TestExtractLongTerm:
     async def test_extract_multiple_facts_mixed(self):
         """混合有无 user_id 的事实应正确处理。"""
         mm, short, long, extractor = _make_memory_manager()
-        short.get_recent = AsyncMock(return_value="")
+        short.get_recent_messages = MagicMock(return_value=[])
         facts = [
             MemoryFact(content="general", metadata={}),
             MemoryFact(content="user specific", metadata={}, user_id="user1"),
@@ -509,12 +510,13 @@ class TestTriggerStrategy:
         """smart 策略下重要消息应触发完整提取流程。"""
         mm, short, long, extractor = _make_memory_manager(trigger="smart")
         extractor.is_important = AsyncMock(return_value=True)
-        short.get_recent = AsyncMock(return_value="recent")
+        msgs = [_make_message("recent message")]
+        short.get_recent_messages = MagicMock(return_value=msgs)
         facts = [MemoryFact(content="extracted", metadata={}, user_id="user1")]
         extractor.extract = AsyncMock(return_value=facts)
 
         await mm.save("sess1", _make_message("important"))
 
-        extractor.extract.assert_awaited_once_with("recent")
+        extractor.extract.assert_awaited_once_with(msgs)
         long.add.assert_awaited_once_with("sess1", "extracted", {})
         long.add_user.assert_awaited_once_with("user1", "extracted")
