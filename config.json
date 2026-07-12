@@ -1,0 +1,28 @@
+{
+    "sqlite": {
+        "path": "./data/sessions.db"
+    },
+    "memory": {
+        "short_term_size": 20,
+        "vector_db": "lancedb",
+        "vector_path": "./data/vectors",
+        "embedding_model": "all-MiniLM-L6-v2",
+        "extraction": {
+            "trigger": "smart",
+            "model": "mimo"
+        }
+    },
+    "llm": {
+        "default": "mimo",
+        "providers": {
+            "mimo": {
+                "type": "openai",
+                "model": "mimo-v2.5-pro",
+                "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+                "api_key": "tp-cuqtkqsgj4ossdnwp1idkxbp43l8xsumvlrrjzc3rml3d5cg",
+                "verify_ssl": false
+            }
+        }
+    },
+    "planner": "planners.react_planner.ReActPlanner"
+}

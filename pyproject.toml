@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-framework"
+version = "0.1.0"
+description = "Multi-session AI Agent framework"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "aiosqlite>=0.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "anyio>=4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["agent-framework/tests", "tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
