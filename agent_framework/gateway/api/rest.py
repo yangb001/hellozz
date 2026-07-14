@@ -5,6 +5,7 @@ including session management and message handling.
 
 参考：详细设计.md 第8节
 """
+import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
@@ -14,6 +15,8 @@ from pydantic import BaseModel, Field
 from ..dependencies import get_session_manager
 from ...core.session_manager import SessionManager
 from ...interfaces.session import SessionContext, Message
+
+logger = logging.getLogger("agent_framework.gateway.rest")
 
 
 # ============================================================================
@@ -351,6 +354,7 @@ async def send_message(
             detail=ErrorResponse(error="Session not found", detail=str(e)).dict()
         )
     except Exception as e:
+        logger.error(f"Error processing message in session {session_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(error="Failed to process message", detail=str(e)).dict()

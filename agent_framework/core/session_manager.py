@@ -1,10 +1,13 @@
 """Session Manager - Core component for managing agent sessions with Actor model."""
 import asyncio
+import logging
 import uuid
 from typing import Dict, Any, Callable, Optional
 
 from agent_framework.interfaces.session import SessionContext, Message
 from agent_framework.interfaces.events import Event
+
+logger = logging.getLogger("agent_framework.core.session_manager")
 
 
 def generate_id() -> str:
@@ -121,6 +124,7 @@ class SessionManager:
                 asyncio.create_task(memory.extract_long_term(sid))
 
             except Exception as e:
+                logger.error(f"Error processing message in session {sid}: {e}", exc_info=True)
                 future.set_exception(e)
 
     async def process_message(
@@ -141,7 +145,11 @@ class SessionManager:
             ValueError: If session_id does not exist.
         """
         if session_id not in self._session_queues:
-            raise ValueError(f"Session '{session_id}' does not exist")
+            # Try to resume session from storage if not in memory
+            ctx = await self.resume_session(session_id)
+            if ctx is None:
+                raise ValueError(f"Session '{session_id}' does not exist")
+            logger.info(f"Resumed session {session_id} from storage")
         future = asyncio.Future()
         await self._session_queues[session_id].put((user_msg, future))
         return future

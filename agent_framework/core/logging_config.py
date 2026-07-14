@@ -36,6 +36,7 @@ MODULE_LOGGERS = {
     "infrastructure.openai_llm": "llm.log",
     "infrastructure.ollama_llm": "llm.log",
     "infrastructure.storage": "llm.log",
+    "infrastructure.llm_debug": "llm_debug.log",
     "runtime": "app.log",
     "runtime.agent_runtime": "app.log",
 }

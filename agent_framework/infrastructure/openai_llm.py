@@ -11,12 +11,16 @@ API endpoints:
 
 参考：详细设计.md 第9.1节
 """
+import logging
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, Any, Optional
 
 import httpx
 
 from agent_framework.infrastructure.llm_gateway import LLMGateway, LLMConfig, LLMProvider
+
+# Module logger for debugging
+_logger = logging.getLogger("agent_framework.infrastructure.llm_debug")
 
 
 @dataclass
@@ -178,6 +182,9 @@ class OpenAILLM(LLMGateway):
         client = self._get_client()
         payload = self._build_payload(prompt, stream=False, **kwargs)
 
+        # Debug logging for LLM request
+        _logger.debug(f"LLM Request | model={self._config.model} | payload={payload}")
+
         try:
             response = await client.post(
                 self._completions_endpoint,
@@ -185,6 +192,9 @@ class OpenAILLM(LLMGateway):
             )
             response.raise_for_status()
             result = response.json()
+
+            # Debug logging for LLM response
+            _logger.debug(f"LLM Response | model={self._config.model} | result={result}")
 
             # Extract content from OpenAI response format
             choices = result.get("choices", [])
@@ -218,6 +228,9 @@ class OpenAILLM(LLMGateway):
         client = self._get_client()
         payload = self._build_payload(prompt, stream=True, **kwargs)
 
+        # Debug logging for LLM streaming request
+        _logger.debug(f"LLM Stream Request | model={self._config.model} | payload={payload}")
+
         try:
             async with client.stream(
                 "POST",
@@ -227,27 +240,35 @@ class OpenAILLM(LLMGateway):
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if line:
+                        _logger.debug(f"LLM Stream Raw | line={repr(line)}")
+
                         # Skip empty lines and "data: [DONE]" marker
                         line = line.strip()
                         if not line or line == "data: [DONE]":
                             continue
 
-                        # Remove "data: " prefix if present
-                        if line.startswith("data: "):
-                            line = line[6:]
+                        # Remove "data:" or "data: " prefix if present
+                        if line.startswith("data:"):
+                            if line.startswith("data: "):
+                                line = line[6:]
+                            else:
+                                line = line[5:]
 
                         try:
                             import json
+                            # DEBUG: Log raw line before parsing
                             data = json.loads(line)
                             choices = data.get("choices", [])
                             if choices:
                                 delta = choices[0].get("delta", {})
                                 content = delta.get("content", "")
                                 if content:
+                                    # Debug logging for each streaming chunk/token
+                                    _logger.debug(f"LLM Stream Chunk | model={self._config.model} | token={content}")
                                     yield content
-                        except Exception:
-                            # Skip malformed JSON lines
-                            pass
+                        except Exception as e:
+                            # Log malformed JSON lines - show repr to reveal invisible chars
+                            _logger.warning(f"Failed to parse streaming response line: repr={repr(line)} | Length={len(line)} | Error: {e}")
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"OpenAI API error: {e.response.status_code}") from e
         except httpx.RequestError as e:

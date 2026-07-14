@@ -114,7 +114,7 @@ class ReActPlanner(BasePlanner):
                 # Check if tool exists
                 if action.tool not in tools:
                     error_msg = f"Unknown tool: {action.tool}. Available tools: {list(tools.keys())}"
-                    logger.error(error_msg)
+                    logger.error(error_msg, exc_info=True)
                     yield Event(type="error", content=error_msg)
                     break
 
@@ -150,7 +150,7 @@ class ReActPlanner(BasePlanner):
 
                 except Exception as e:
                     error_msg = f"Error executing tool {action.tool}: {str(e)}"
-                    logger.error(error_msg)
+                    logger.error(error_msg, exc_info=True)
                     yield Event(type="error", content=error_msg)
                     break
 

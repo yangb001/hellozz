@@ -27,6 +27,7 @@ from ..memory.vector_memory import VectorMemory
 from ..memory.extractor import MemoryExtractor
 from ..infrastructure.openai_llm import OpenAILLM, OpenAIConfig
 from ..infrastructure.storage.session_storage import SessionStorage
+from ..infrastructure.storage.sqlite_session_storage import SQLiteSessionStorage
 from ..interfaces.session import SessionContext
 from ..core.config import load_config
 from ..core.logging_config import setup_logging, LoggingConfig as CoreLoggingConfig, get_logger
@@ -57,6 +58,11 @@ def build_session_manager() -> SessionManager:
     """
     # Load configuration
     config = load_config("config.json")
+
+    # Ensure data directory exists for SQLite
+    data_dir = os.path.dirname(config.sqlite.path)
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
 
     # Create LLM Gateway
     llm_config = config.llm
@@ -103,8 +109,8 @@ def build_session_manager() -> SessionManager:
     # Create EventBus
     event_bus = EventBus()
 
-    # Create Storage
-    storage = InMemorySessionStorage()
+    # Create Storage - use SQLite for persistent storage
+    storage = SQLiteSessionStorage(db_path=config.sqlite.path)
 
     # Create SessionManager
     session_manager = SessionManager(

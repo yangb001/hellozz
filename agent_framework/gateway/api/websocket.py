@@ -3,11 +3,13 @@
 This module defines the WebSocket endpoint for real-time chat communication.
 """
 import asyncio
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..dependencies import get_session_manager
 
+logger = logging.getLogger("agent_framework.gateway.websocket")
 router = APIRouter()
 
 
@@ -64,6 +66,7 @@ async def chat(websocket: WebSocket, session_id: str, token: str):
                     "content": str(e)
                 })
             except Exception as e:
+                logger.error(f"Error processing WebSocket message in session {session_id}: {e}", exc_info=True)
                 await websocket.send_json({
                     "type": "error",
                     "content": f"Processing error: {str(e)}"
