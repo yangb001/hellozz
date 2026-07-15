@@ -4,6 +4,7 @@ This module defines the WebSocket endpoint for real-time chat communication.
 """
 import asyncio
 import logging
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -27,46 +28,62 @@ async def chat(websocket: WebSocket, session_id: str, token: str):
     """
     await websocket.accept()
     sm = get_session_manager()
+    connection_id = str(uuid.uuid4())[:8]
+    logger.debug(f"[WS:{connection_id}] WebSocket connected | session_id={session_id}")
 
     try:
         while True:
             data = await websocket.receive_json()
+            logger.debug(f"[WS:{connection_id}] RECEIVED from client: {data}")
 
             if data.get("type") != "user_message":
+                error_msg = "Invalid message type. Expected 'user_message'."
+                logger.debug(f"[WS:{connection_id}] Sending error: {error_msg}")
                 await websocket.send_json({
                     "type": "error",
-                    "content": "Invalid message type. Expected 'user_message'."
+                    "content": error_msg
                 })
                 continue
 
             if sm is None:
+                error_msg = "SessionManager not initialized."
+                logger.debug(f"[WS:{connection_id}] Sending error: {error_msg}")
                 await websocket.send_json({
                     "type": "error",
-                    "content": "SessionManager not initialized."
+                    "content": error_msg
                 })
                 continue
 
             try:
-                future = await sm.process_message(session_id, {
+                logger.debug(f"[WS:{connection_id}] Processing message with streaming...")
+                async for event in sm.process_message_stream(session_id, {
                     "role": "user",
                     "content": data.get("content", ""),
                     "sender_id": "websocket_user"
-                })
-                events = await future
-                for event in events:
-                    await websocket.send_json({
+                }):
+                    event_json = {
                         "type": event.type,
                         "content": event.content,
                         "metadata": event.metadata,
                         "timestamp": event.timestamp.isoformat()
-                    })
+                    }
+                    logger.debug(f"[WS:{connection_id}] Streaming event: type={event.type}, content_len={len(event.content) if event.content else 0}")
+                    try:
+                        await websocket.send_json(event_json)
+                        logger.debug(f"[WS:{connection_id}] Event SENT successfully")
+                    except Exception as e:
+                        logger.error(f"[WS:{connection_id}] WebSocket send failed: {e}", exc_info=True)
+                        break
+                logger.debug(f"[WS:{connection_id}] Streaming completed")
             except ValueError as e:
+                error_msg = str(e)
+                logger.debug(f"[WS:{connection_id}] Sending ValueError: {error_msg}")
                 await websocket.send_json({
                     "type": "error",
-                    "content": str(e)
+                    "content": error_msg
                 })
             except Exception as e:
-                logger.error(f"Error processing WebSocket message in session {session_id}: {e}", exc_info=True)
+                logger.error(f"[WS:{connection_id}] Error processing WebSocket message in session {session_id}: {e}", exc_info=True)
                 await websocket.send_json({
                     "type": "error",
                     "content": f"Processing error: {str(e)}"

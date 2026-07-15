@@ -1,10 +1,13 @@
 # Core Dependencies
 pydantic>=2.0
+pyyaml>=6.0
+aiosqlite>=0.19.0
+
+# Web Framework
+fastapi>=0.100
+uvicorn>=0.23
+httpx>=0.24
 
 # Testing
 pytest>=8.0
 anyio>=4.0
-
-# Infrastructure
-pyyaml>=6.0
-aiosqlite>=0.19.0

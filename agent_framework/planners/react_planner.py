@@ -1,14 +1,16 @@
-"""ReAct Planner - Reasoning and Acting planning strategy.
+"""ReAct Planner - Modern ReAct planning strategy using chat completions API.
 
 This module implements the ReAct (Reasoning + Acting) planning pattern,
 where the agent alternates between reasoning about the problem and
 taking actions using tools until it reaches a final answer.
 
+ModernReAct uses the chat completions API format with messages array
+and tool_calls support instead of parsing plain text.
+
 参考：详细设计.md 第7节
 """
-import re
+import json
 import logging
-from dataclasses import dataclass
 from typing import AsyncIterator, Dict, Any, Optional, List
 
 from agent_framework.interfaces.base_planner import BasePlanner
@@ -20,33 +22,20 @@ from agent_framework.interfaces.events import Event
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class Action:
-    """Represents a parsed action from LLM output.
-
-    Attributes:
-        type: Type of action (tool_call, final_answer, thought).
-        tool: Name of the tool to call (for tool_call actions).
-        input: Input to pass to the tool (for tool_call actions).
-        content: Content text (for final_answer or thought actions).
-    """
-    type: str
-    tool: Optional[str] = None
-    input: Optional[str] = None
-    content: Optional[str] = None
+from agent_framework.interfaces.llm_types import FunctionCall, ToolCall, ChatResponse, ChatMessage
 
 
 class ReActPlanner(BasePlanner):
-    """ReAct (Reasoning + Acting) planner implementation.
+    """Modern ReAct planner using chat completions API.
 
     Implements the ReAct planning pattern where the agent:
     1. Reasons about the current situation (Thought)
-    2. Decides on an action (Action)
-    3. Observes the result (Observation)
+    2. Decides on an action (Action) via tool_calls
+    3. Observes the result (Observation) from tool execution
     4. Repeats until reaching a Final Answer
 
-    This approach combines chain-of-thought reasoning with tool usage,
-    allowing the agent to iteratively solve complex problems.
+    This implementation uses the modern chat completions API format
+    with messages array instead of prompt string manipulation.
 
     Attributes:
         name: Planner identifier, defaults to "react".
@@ -55,7 +44,7 @@ class ReActPlanner(BasePlanner):
     """
 
     name: str = "react"
-    description: str = "ReAct planner that alternates between reasoning and acting"
+    description: str = "Modern ReAct planner using chat completions API with tool_calls support"
 
     def __init__(self, name: str = "react", description: str = None, max_iterations: int = 10):
         """Initialize the ReActPlanner.
@@ -76,108 +65,219 @@ class ReActPlanner(BasePlanner):
         tools: Dict[str, Any],
         llm_call: callable,
     ) -> AsyncIterator[Event]:
-        """Execute ReAct planning loop, yielding events.
+        """Execute Modern ReAct planning loop, yielding events.
 
         Args:
             ctx: Current session context with messages and state.
             memory: Memory system for retrieving relevant context.
             tools: Dictionary of available tools by name.
-            llm_call: Async callable that takes a prompt and yields response tokens.
+            llm_call: Async callable that takes (messages, tools) and returns ChatResponse.
 
         Yields:
             Event objects representing thoughts, actions, observations, and final answer.
         """
-        # Build initial prompt with context
-        prompt = await self._build_prompt(ctx, memory, tools)
+        # Build initial messages array
+        messages = await self._build_messages(ctx, memory, tools)
 
         iteration = 0
-        while iteration < self.max_iterations:
+        has_tool_calls = True  # Start with true to enter loop on first iteration
+
+        while has_tool_calls and iteration < self.max_iterations:
             iteration += 1
-            logger.debug(f"ReAct iteration {iteration}/{self.max_iterations}")
+            logger.debug(f"Modern ReAct iteration {iteration}/{self.max_iterations}")
+            has_tool_calls = False  # Reset, will be set true if tool calls found
 
-            # Collect LLM response
-            full_text = ""
-            async for token in llm_call(prompt):
-                full_text += token
-                yield Event(type="text_token", content=token)
+            # Call LLM with messages and tools
+            # Convert ChatMessage objects to dicts for JSON serialization
+            try:
+                messages_dicts = [self._chat_message_to_dict(m) for m in messages]
+                response_or_events = llm_call(messages_dicts, tools)
 
-            # Parse the action from LLM response
-            action = self._parse_action(full_text)
-
-            if action.type == "final_answer":
-                # Yield final answer event and break
-                yield Event(type="final_answer", content=action.content)
-                logger.debug(f"ReAct completed with final answer after {iteration} iterations")
+                # Check if llm_call returns an async iterator (streaming) or a ChatResponse
+                if hasattr(response_or_events, '__aiter__'):
+                    # Streaming response - yield each event directly without waiting
+                    async for event in response_or_events:
+                        yield event
+                        # Track if we received a final answer or tool call
+                        if event.type == "final_answer":
+                            return
+                        if event.type == "action":
+                            has_tool_calls = True
+                    # After streaming completes, continue to next iteration if needed
+                    if has_tool_calls:
+                        continue
+                    break
+                else:
+                    # Non-streaming response (ChatResponse)
+                    response = response_or_events
+            except Exception as e:
+                logger.error(f"Error calling LLM: {e}", exc_info=True)
+                yield Event(type="error", content=f"LLM call failed: {e}")
                 break
 
-            elif action.type == "tool_call":
-                # Check if tool exists
-                if action.tool not in tools:
-                    error_msg = f"Unknown tool: {action.tool}. Available tools: {list(tools.keys())}"
-                    logger.error(error_msg, exc_info=True)
-                    yield Event(type="error", content=error_msg)
-                    break
-
-                # Yield action event
-                yield Event(type="action", content=f"Calling {action.tool}...")
-
-                # Execute the tool
-                try:
-                    tool = tools[action.tool]
-                    # Handle both async and sync tool.run methods
-                    import asyncio
-                    import inspect
-
-                    # Check if tool.run is a coroutine function
-                    is_async = inspect.iscoroutinefunction(tool.run)
-
-                    if is_async:
-                        result = await tool.run(action.input, session_id=ctx.session_id)
-                    else:
-                        # For sync functions, call directly
-                        result = tool.run(action.input, session_id=ctx.session_id)
-
-                    # Ensure result is a string
-                    if not isinstance(result, str):
-                        result = str(result)
-
-                    # Append observation to prompt for next iteration
-                    prompt += f"\nObservation: {result}"
-
-                    # Yield observation event
-                    yield Event(type="observation", content=result)
-                    logger.debug(f"Tool {action.tool} executed successfully")
-
-                except Exception as e:
-                    error_msg = f"Error executing tool {action.tool}: {str(e)}"
-                    logger.error(error_msg, exc_info=True)
-                    yield Event(type="error", content=error_msg)
-                    break
-
+            # Handle response based on type
+            if isinstance(response, ChatResponse):
+                # Modern format with ChatResponse
+                async for event in self._handle_chat_response(response, messages, iteration):
+                    yield event
+                    if event.type == "final_answer":
+                        # Final answer received, exit loop
+                        return
+                    if event.type == "action":
+                        # Tool execution in progress
+                        has_tool_calls = True
+            elif isinstance(response, str):
+                # Legacy string format - yield as text token and continue
+                yield Event(type="text_token", content=response)
             else:
-                # For thought or unknown action types, continue the loop
-                logger.debug(f"Action type: {action.type}, continuing loop")
+                logger.warning(f"Unexpected response type from llm_call: {type(response)}")
 
-        else:
-            # Max iterations reached without final answer
+        # Check if max iterations reached
+        if iteration >= self.max_iterations:
             warning_msg = f"ReAct loop reached maximum iterations ({self.max_iterations}) without final answer"
             logger.warning(warning_msg)
             yield Event(type="error", content=warning_msg)
 
-    async def _build_prompt(
+    async def _handle_chat_response(
+        self,
+        response: ChatResponse,
+        messages: List[ChatMessage],
+        iteration: int
+    ) -> AsyncIterator[Event]:
+        """Handle a ChatResponse from LLM.
+
+        Args:
+            response: The ChatResponse from LLM.
+            messages: Current messages array (will be modified by adding tool results).
+            iteration: Current iteration number.
+
+        Yields:
+            Event objects based on response content and tool calls.
+        """
+        if response.has_tool_calls:
+            # Add assistant message with tool calls to messages
+            messages.append(ChatMessage(
+                role="assistant",
+                content=response.content
+            ))
+
+            # Execute each tool call and add results to messages
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.function.name
+                tool_args_raw = tool_call.function.arguments
+
+                yield Event(type="action", content=f"Calling {tool_name}...")
+                logger.debug(f"Tool call: {tool_name} with args: {tool_args_raw}")
+
+                # Parse tool arguments
+                try:
+                    tool_args = json.loads(tool_args_raw) if tool_args_raw else {}
+                except json.JSONDecodeError:
+                    tool_args = {"input": tool_args_raw}
+
+                # Get tools from the tools_ref set during _build_messages
+                # We need to pass tools through - let's get it from self
+                tools = getattr(self, '_tools_ref', {})
+
+                # Execute tool if available
+                if tool_name not in tools:
+                    error_msg = f"Unknown tool: {tool_name}"
+                    logger.error(error_msg, exc_info=True)
+                    messages.append(ChatMessage(
+                        role="tool",
+                        content=f"Error: {error_msg}",
+                        tool_call_id=tool_call.id
+                    ))
+                    yield Event(type="error", content=error_msg)
+                    continue
+
+                tool = tools[tool_name]
+
+                # Execute the tool
+                try:
+                    import asyncio
+                    import inspect
+
+                    is_async = inspect.iscoroutinefunction(tool.run)
+                    session_id = getattr(self, '_session_id_ref', '')
+
+                    if is_async:
+                        result = await tool.run(tool_args.get("input", ""), session_id=session_id)
+                    else:
+                        result = tool.run(tool_args.get("input", ""), session_id=session_id)
+
+                    if not isinstance(result, str):
+                        result = str(result)
+
+                    logger.debug(f"Tool {tool_name} result: {result[:100]}...")
+
+                    # Add tool result message to messages
+                    messages.append(ChatMessage(
+                        role="tool",
+                        content=result,
+                        tool_call_id=tool_call.id
+                    ))
+
+                    yield Event(type="observation", content=result)
+
+                except Exception as e:
+                    error_msg = f"Error executing tool {tool_name}: {e}"
+                    logger.error(error_msg, exc_info=True)
+
+                    messages.append(ChatMessage(
+                        role="tool",
+                        content=f"Error: {error_msg}",
+                        tool_call_id=tool_call.id
+                    ))
+                    yield Event(type="error", content=error_msg)
+
+        elif response.content:
+            # Check if content contains final answer indicators
+            content_lower = response.content.lower()
+
+            if any(indicator in content_lower for indicator in ['final answer:', 'finalanswer', 'the answer is']):
+                # Extract and yield final answer
+                final_answer = self._extract_final_answer(response.content)
+                yield Event(type="final_answer", content=final_answer)
+                logger.debug(f"Modern ReAct completed with final answer at iteration {iteration}")
+
+                # Add assistant message to messages
+                messages.append(ChatMessage(role="assistant", content=response.content))
+            else:
+                # Regular content - yield as text token
+                yield Event(type="text_token", content=response.content)
+                messages.append(ChatMessage(role="assistant", content=response.content))
+
+    def _extract_final_answer(self, content: str) -> str:
+        """Extract final answer text from content.
+
+        Args:
+            content: Raw content from LLM.
+
+        Returns:
+            Extracted final answer text.
+        """
+        import re
+        # Try to find "Final Answer:" pattern
+        match = re.search(r'Final Answer:\s*(.*)', content, re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(1).strip()
+
+        # Fallback: return content as-is
+        return content.strip()
+
+    async def _build_messages(
         self,
         ctx: SessionContext,
         memory: BaseMemory,
         tools: Dict[str, Any]
-    ) -> str:
-        """Build the system prompt for the LLM.
+    ) -> List[ChatMessage]:
+        """Build the messages array for the chat completions API.
 
-        Constructs a prompt that includes:
-        - System instructions for ReAct behavior
-        - Available tools and their descriptions
-        - Tool call examples
-        - Memory context (relevant past information)
-        - Conversation history
+        Constructs a messages array that includes:
+        - System message with ReAct instructions and tool definitions
+        - Memory context as a preceding user message
+        - Conversation history from ctx.messages
 
         Args:
             ctx: Current session context.
@@ -185,56 +285,21 @@ class ReActPlanner(BasePlanner):
             tools: Dictionary of available tools.
 
         Returns:
-            Formatted prompt string.
+            List of ChatMessage objects ready for API call.
         """
-        # Start with ReAct system instructions
-        prompt_parts = [
-            "You are a helpful assistant that uses the ReAct (Reasoning + Acting) pattern.",
-            "",
-            "## Response Format",
-            "For each step, you MUST follow one of these formats:",
-            "",
-            "### Option 1: Use a tool",
-            "Thought: [your reasoning about what to do next]",
-            "Action: [tool_name]",
-            "Action Input: [input for the tool]",
-            "",
-            "### Option 2: Provide final answer",
-            "Thought: [your final reasoning]",
-            "Final Answer: [your complete answer to the user]",
-            "",
-            "## Important Rules",
-            "- Always start with 'Thought:' to explain your reasoning",
-            "- After using a tool, you will receive an 'Observation:' with the result",
-            "- Continue reasoning until you can provide a 'Final Answer:'",
-            "- Use the exact format shown above for tool calls",
-            "",
-        ]
+        messages: List[ChatMessage] = []
 
-        # Add available tools with examples
-        if tools:
-            prompt_parts.append("## Available Tools")
-            for tool_name, tool in tools.items():
-                description = getattr(tool, 'description', 'No description available')
-                prompt_parts.append(f"- **{tool_name}**: {description}")
-            prompt_parts.append("")
+        # Store tools and session_id reference for use in _handle_chat_response
+        self._tools_ref = tools
+        self._session_id_ref = ctx.session_id
 
-            # Add tool call example
-            first_tool_name = list(tools.keys())[0]
-            prompt_parts.append("## Tool Call Example")
-            prompt_parts.append("Thought: I need to search for information about Python.")
-            prompt_parts.append(f"Action: {first_tool_name}")
-            prompt_parts.append("Action Input: Python programming language")
-            prompt_parts.append("")
-            prompt_parts.append("After receiving the observation, continue with:")
-            prompt_parts.append("Thought: Based on the search results, I can now answer.")
-            prompt_parts.append("Final Answer: Python is a high-level programming language...")
-            prompt_parts.append("")
+        # Build system message with tools
+        system_content = self._build_system_message(tools)
+        messages.append(ChatMessage(role="system", content=system_content))
 
-        # Retrieve and add memory context
+        # Retrieve memory context and add as user message
         try:
             if ctx.messages:
-                # Get the latest user message for memory retrieval
                 latest_user_msg = None
                 for msg in reversed(ctx.messages):
                     if msg.role == "user":
@@ -248,158 +313,165 @@ class ReActPlanner(BasePlanner):
                         user_ids=ctx.participants
                     )
                     if memory_context:
-                        prompt_parts.append("## Relevant Context from Memory")
-                        prompt_parts.append(memory_context)
-                        prompt_parts.append("")
+                        context_msg = ChatMessage(
+                            role="user",
+                            content=f"Relevant context:\n{memory_context}"
+                        )
+                        messages.append(context_msg)
         except Exception as e:
             logger.warning(f"Failed to retrieve memory context: {e}")
 
-        # Add conversation history
+        # Add conversation history (skip system, keep user/assistant/tool)
         if ctx.messages:
-            prompt_parts.append("## Conversation History")
-            for msg in ctx.messages[-10:]:  # Last 10 messages
-                sender = msg.sender_id or msg.role
-                prompt_parts.append(f"[{msg.role}] ({sender}): {msg.content}")
-            prompt_parts.append("")
+            for msg in ctx.messages[-10:]:
+                if msg.role == "system":
+                    continue
+                elif msg.role == "tool":
+                    messages.append(ChatMessage(
+                        role="tool",
+                        content=msg.content,
+                        tool_call_id=getattr(msg, 'tool_call_id', None)
+                    ))
+                elif msg.role in ("user", "assistant"):
+                    messages.append(ChatMessage(
+                        role=msg.role,
+                        content=msg.content,
+                        name=getattr(msg, 'sender_id', None)
+                    ))
 
-        prompt_parts.append("## Current Task")
-        prompt_parts.append("Now, let's continue the conversation using the ReAct pattern.")
-        prompt_parts.append("Remember to use 'Thought:' first, then either 'Action:' + 'Action Input:' or 'Final Answer:'.")
-        prompt_parts.append("")
+        return messages
 
-        return "\n".join(prompt_parts)
-
-    def _parse_action(self, text: str) -> Action:
-        """Parse an action from LLM output text.
-
-        Analyzes the LLM response to determine the next action.
-        Supports multiple formats:
-
-        Standard formats:
-        - "Final Answer: ..."
-        - "Action: tool_name\nAction Input: input"
-        - "Thought: ..."
-
-        Alternative formats:
-        - "Use tool: tool_name\nInput: input"
-        - "Tool: tool_name\nQuery: input"
-        - "Call tool_name with query: input"
-        - '{"tool": "tool_name", "input": "input"}'
-        - "tool_name('input')"
-        - "I will use tool_name to find: input"
-        - "The answer is ..."
-        - "In conclusion, ..."
-        - "To summarize, ..."
+    def _build_system_message(self, tools: Dict[str, Any]) -> str:
+        """Build the system message content with ReAct instructions.
 
         Args:
-            text: The complete LLM response text.
+            tools: Dictionary of available tools.
 
         Returns:
-            Action object representing the parsed action.
+            Formatted system message string.
         """
-        # Clean the text
+        parts = [
+            "You are a helpful assistant that uses the ReAct (Reasoning + Acting) pattern.",
+            "",
+            # "## Response Format",
+            # "For each response, you MUST produce one of:",
+            # "",
+            # "### Option 1: Tool Call (for complex tasks requiring external data)",
+            # "When you need to use a tool, respond with:",
+            # '{"content": "", "tool_calls": [{"id": "call_1", "name": "tool_name", "arguments": "{\\"input\\": \\"query\\"}"}]}',
+            # "",
+            # "### Option 2: Final Answer (for direct responses)",
+            # "When you can answer directly, respond with:",
+            # '{"content": "Your answer here...", "tool_calls": []}',
+            # "",
+            # "## Important Rules",
+            # "- Use tool_calls array to request tool execution",
+            # "- Tools are executed and results returned to you",
+            # "- Continue reasoning until you can provide a complete answer",
+            # "- The content field should be empty when using tools",
+            # "- When providing final answer, put the answer in content field and empty tool_calls",
+            # "",
+        ]
+
+        # Add available tools
+        if tools:
+            parts.append("## Available Tools")
+            for tool_name, tool in tools.items():
+                description = getattr(tool, 'description', 'No description available')
+                parts.append(f"- **{tool_name}**: {description}")
+            parts.append("")
+
+        parts.append("Remember: Use tool_calls for external actions, content for final answers.")
+        return "\n".join(parts)
+
+    async def _build_prompt(
+        self,
+        ctx: SessionContext,
+        memory: BaseMemory,
+        tools: Dict[str, Any]
+    ) -> str:
+        """Build legacy prompt string (for backward compatibility).
+
+        Deprecated: Use _build_messages instead for modern chat completions API.
+
+        Args:
+            ctx: Current session context.
+            memory: Memory system for retrieving relevant context.
+            tools: Dictionary of available tools.
+
+        Returns:
+            Formatted prompt string.
+        """
+        messages = await self._build_messages(ctx, memory, tools)
+        prompt_parts = []
+
+        for msg in messages:
+            if msg.role == "system":
+                prompt_parts.append(f"System: {msg.content}")
+            elif msg.role == "user":
+                prompt_parts.append(f"User: {msg.content}")
+            elif msg.role == "assistant":
+                prompt_parts.append(f"Assistant: {msg.content}")
+            elif msg.role == "tool":
+                prompt_parts.append(f"Tool Result: {msg.content}")
+
+        return "\n\n".join(prompt_parts)
+
+    def _chat_message_to_dict(self, msg: ChatMessage) -> Dict[str, Any]:
+        """Convert a ChatMessage to a dictionary for JSON serialization.
+
+        Args:
+            msg: ChatMessage object to convert.
+
+        Returns:
+            Dictionary representation suitable for JSON encoding.
+        """
+        result = {"role": msg.role, "content": msg.content}
+        if msg.name:
+            result["name"] = msg.name
+        if msg.tool_call_id:
+            result["tool_call_id"] = msg.tool_call_id
+        return result
+
+    def _parse_action(self, text: str):
+        """Parse legacy action format (for backward compatibility).
+
+        Deprecated: With modern ChatResponse format, parsing is handled
+        by extracting content/tool_calls from the response object.
+
+        Args:
+            text: Text to parse.
+
+        Returns:
+            Action object (for backward compatibility only).
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class LegacyAction:
+            type: str
+            tool: Optional[str] = None
+            input: Optional[str] = None
+            content: Optional[str] = None
+
+        import re
         text = text.strip()
 
-        # Empty text check
         if not text:
-            return Action(type="final_answer", content="")
+            return LegacyAction(type="final_answer", content="")
 
-        # Check for Final Answer (case-insensitive)
+        # Check for final answer
         final_answer_match = re.search(r'Final Answer:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
         if final_answer_match:
-            content = final_answer_match.group(1).strip()
-            return Action(type="final_answer", content=content)
+            return LegacyAction(type="final_answer", content=final_answer_match.group(1).strip())
 
-        # Check for standard Action/Action Input format (case-insensitive)
-        # Use findall to get all matches and take the last one
-        action_matches = re.findall(r'Action:\s*(\S+)', text, re.IGNORECASE)
-        action_input_matches = re.findall(r'Action Input:\s*(.*)', text, re.IGNORECASE)
+        # Check for action
+        action_match = re.search(r'Action:\s*(\S+)', text, re.IGNORECASE)
+        if action_match:
+            tool_name = action_match.group(1).strip()
+            input_match = re.search(r'Action Input:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
+            input_str = input_match.group(1).strip() if input_match else ""
+            return LegacyAction(type="tool_call", tool=tool_name, input=input_str)
 
-        if action_matches:
-            # Take the last Action found
-            tool_name = action_matches[-1].strip()
-            # Take the last Action Input found (if any)
-            action_input = action_input_matches[-1].strip() if action_input_matches else ""
-            return Action(type="tool_call", tool=tool_name, input=action_input)
-
-        # Check for "Use tool:" format
-        use_tool_match = re.search(r'Use tool:\s*(\S+)', text, re.IGNORECASE)
-        if use_tool_match:
-            tool_name = use_tool_match.group(1).strip()
-            input_match = re.search(r'Input:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-            action_input = input_match.group(1).strip() if input_match else ""
-            return Action(type="tool_call", tool=tool_name, input=action_input)
-
-        # Check for "Tool:" format with "Query:" or "Input:"
-        tool_colon_match = re.search(r'Tool:\s*(\S+)', text, re.IGNORECASE)
-        if tool_colon_match:
-            tool_name = tool_colon_match.group(1).strip()
-            query_match = re.search(r'(?:Query|Input):\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-            action_input = query_match.group(1).strip() if query_match else ""
-            return Action(type="tool_call", tool=tool_name, input=action_input)
-
-        # Check for "Call tool_name with" format
-        call_match = re.search(r'Call\s+(\w+)\s+with\s+(?:query|input):\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-        if call_match:
-            tool_name = call_match.group(1).strip()
-            action_input = call_match.group(2).strip()
-            return Action(type="tool_call", tool=tool_name, input=action_input)
-
-        # Check for JSON-like format: {"tool": "name", "input": "value"}
-        json_match = re.search(r'\{["\']tool["\']:\s*["\'](\w+)["\'].*?["\']input["\']:\s*["\']([^"\']*)["\']', text, re.IGNORECASE)
-        if json_match:
-            tool_name = json_match.group(1).strip()
-            action_input = json_match.group(2).strip()
-            return Action(type="tool_call", tool=tool_name, input=action_input)
-
-        # Check for function call format: tool_name('input') or tool_name("input")
-        func_match = re.search(r'(\w+)\(["\']([^"\']*)["\']\)', text)
-        if func_match:
-            tool_name = func_match.group(1).strip()
-            action_input = func_match.group(2).strip()
-            # Avoid matching common Python functions
-            if tool_name not in ['print', 'len', 'str', 'int', 'float', 'list', 'dict', 'set', 'type']:
-                return Action(type="tool_call", tool=tool_name, input=action_input)
-
-        # Check for "I will use tool_name to" format
-        i_will_match = re.search(r'I will use\s+(\w+)\s+to\s+\w+:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-        if i_will_match:
-            tool_name = i_will_match.group(1).strip()
-            action_input = i_will_match.group(2).strip()
-            return Action(type="tool_call", tool=tool_name, input=action_input)
-
-        # Check for alternative final answer formats
-        # "The answer is ..."
-        answer_is_match = re.search(r'(?:The )?[Aa]nswer is\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-        if answer_is_match:
-            content = answer_is_match.group(1).strip()
-            if content:
-                return Action(type="final_answer", content=content)
-
-        # "In conclusion, ..."
-        conclusion_match = re.search(r'In conclusion,\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-        if conclusion_match:
-            content = conclusion_match.group(1).strip()
-            if content:
-                return Action(type="final_answer", content=content)
-
-        # "To summarize, ..."
-        summarize_match = re.search(r'To summarize,\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-        if summarize_match:
-            content = summarize_match.group(1).strip()
-            if content:
-                return Action(type="final_answer", content=content)
-
-        # Check for Thought (case-insensitive)
-        thought_match = re.search(r'Thought:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-        if thought_match:
-            content = thought_match.group(1).strip()
-            # If there's a thought but no clear action, treat as final answer
-            # This handles cases where the LLM just provides a direct response
-            if content and not re.search(r'Action:|Final Answer:|Use tool:|Tool:|Call\s+\w+\s+with', text, re.IGNORECASE):
-                return Action(type="final_answer", content=content)
-            return Action(type="thought", content=content)
-
-        # If no pattern matches, treat the entire text as a final answer
-        # This is a fallback for when LLM doesn't follow the exact format
-        return Action(type="final_answer", content=text)
+        # Default to thought
+        return LegacyAction(type="thought", content=text)

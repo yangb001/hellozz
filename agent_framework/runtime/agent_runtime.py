@@ -6,12 +6,37 @@ by orchestrating context, memory, tools, planner, and LLM gateway.
 The runtime is stateless - it borrows SessionContext at runtime and
 does not maintain any internal state between invocations.
 """
-from typing import AsyncIterator, Dict, Any
+from typing import AsyncIterator, Dict, Any, List, Optional
 
 from ..interfaces.session import SessionContext, Message
-from ..interfaces.events import Event
+from ..interfaces.events import Event, ToolCallEventData
 from ..interfaces.base_memory import BaseMemory
 from ..interfaces.base_planner import BasePlanner
+from ..interfaces.enums import EventType
+from ..interfaces.llm_types import ChatResponse as PlannerChatResponse, ToolCall as PlannerToolCall, FunctionCall
+from ..infrastructure.llm_gateway import StreamChatResponse, ChatResponseType
+
+
+def _tools_to_schemas(tools: Dict[str, Any]) -> List[Dict]:
+    """Convert tools dict to OpenAI tool schemas format.
+
+    Args:
+        tools: Dictionary mapping tool name to BaseTool object.
+
+    Returns:
+        List of OpenAI-compatible tool schema dictionaries.
+    """
+    schemas = []
+    for name, tool in tools.items():
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": getattr(tool, 'description', ''),
+                "parameters": getattr(tool, 'parameters', {"type": "object", "properties": {}})
+            }
+        })
+    return schemas
 
 
 class AgentRuntime:
@@ -59,19 +84,96 @@ class AgentRuntime:
         # Step 2: Save user message to memory
         await memory.save(ctx.session_id, user_msg)
 
-        # Step 3: Define llm_call closure for planner
-        async def llm_call(prompt: str, **kwargs) -> AsyncIterator[str]:
-            """Call LLM gateway and yield response tokens.
+        # Step 3: Define llm_call closure for planner using stream_chat - yields events
+        async def llm_call(messages: List[Dict], tools: Optional[List[Dict]] = None) -> AsyncIterator[Event]:
+            """Call LLM gateway using stream_chat and yield events.
+
+            Streams events directly for true streaming support:
+            - text_token events for content chunks
+            - tool_call_start/argument/end events for tool calls
 
             Args:
-                prompt: The prompt to send to the LLM.
-                **kwargs: Additional arguments for the LLM.
+                messages: List of conversation messages.
+                tools: List of available tools (OpenAI schema format).
 
             Yields:
-                Response tokens from the LLM.
+                Event objects for each chunk of content or tool call.
             """
-            async for token in llm_gateway.stream(prompt, **kwargs):
-                yield token
+            # Convert tools dict to OpenAI schemas if needed
+            tools_schemas = _tools_to_schemas(tools) if tools else None
+
+            async for chunk in llm_gateway.stream_chat(messages, tools=tools_schemas):
+                # Handle content tokens
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield Event(
+                        type=EventType.TEXT_TOKEN,
+                        content=chunk.content,
+                        metadata={"chunk_index": 0}
+                    )
+
+                # Handle tool call events
+                if hasattr(chunk, 'tool_call') and chunk.tool_call:
+                    tc = chunk.tool_call
+                    func = tc.function
+                    func_name = func.name if hasattr(func, 'name') else str(func)
+                    func_args = func.arguments if hasattr(func, 'arguments') else ""
+
+                    # Determine the event type based on ChatResponseType
+                    event_type = chunk.type if hasattr(chunk, 'type') else None
+
+                    if event_type == ChatResponseType.TOOL_CALL_START:
+                        yield Event(
+                            type=EventType.TOOL_CALL_START,
+                            content="",
+                            metadata=ToolCallEventData(
+                                tool_call_id=tc.id,
+                                tool_name=func_name,
+                                arguments="",
+                                is_complete=False
+                            ).__dict__
+                        )
+                    elif event_type == ChatResponseType.TOOL_CALL_ARGUMENT:
+                        yield Event(
+                            type=EventType.TOOL_CALL_ARGUMENT,
+                            content=func_args,
+                            metadata=ToolCallEventData(
+                                tool_call_id=tc.id,
+                                tool_name=func_name,
+                                arguments=func_args,
+                                is_complete=False
+                            ).__dict__
+                        )
+                    elif event_type == ChatResponseType.TOOL_CALL_END:
+                        yield Event(
+                            type=EventType.TOOL_CALL_END,
+                            content="",
+                            metadata=ToolCallEventData(
+                                tool_call_id=tc.id,
+                                tool_name=func_name,
+                                arguments=func_args,
+                                is_complete=True
+                            ).__dict__
+                        )
+                    else:
+                        # Default case for backward compatibility
+                        yield Event(
+                            type=EventType.TOOL_CALL_END,
+                            content="",
+                            metadata=ToolCallEventData(
+                                tool_call_id=tc.id,
+                                tool_name=func_name,
+                                arguments=func_args,
+                                is_complete=True
+                            ).__dict__
+                        )
+
+                # Handle stream done
+                if hasattr(chunk, 'finish_reason') and chunk.finish_reason:
+                    yield Event(
+                        type=EventType.STREAMING_END,
+                        content="",
+                        metadata={"finish_reason": chunk.finish_reason}
+                    )
 
         # Step 4: Run planner and yield events
         async for event in planner.plan_and_act(ctx, memory, tools, llm_call):

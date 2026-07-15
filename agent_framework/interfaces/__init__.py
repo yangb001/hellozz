@@ -15,6 +15,12 @@ from .types import (
     MemoryResult,
     ToolResult,
 )
+from .llm_types import (
+    FunctionCall,
+    ToolCall,
+    ChatResponse,
+    ChatMessage,
+)
 
 __all__ = [
     "Event",
@@ -34,4 +40,8 @@ __all__ = [
     "EventStream",
     "MemoryResult",
     "ToolResult",
+    "FunctionCall",
+    "ToolCall",
+    "ChatResponse",
+    "ChatMessage",
 ]

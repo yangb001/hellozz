@@ -6,10 +6,13 @@ including session management and message handling.
 参考：详细设计.md 第8节
 """
 import logging
+import json
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
+from asyncio import Queue
 
 from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..dependencies import get_session_manager
@@ -288,13 +291,13 @@ async def get_session(
         )
 
 
-@router.post("/sessions/{session_id}/messages", response_model=SendMessageResponse)
+@router.post("/sessions/{session_id}/messages")
 async def send_message(
     session_id: str,
     request: SendMessageRequest,
     session_manager: Optional[SessionManager] = Depends(get_session_manager)
 ):
-    """Send a message to a session.
+    """Send a message to a session and receive streaming SSE response.
 
     Args:
         session_id: ID of the session to send message to.
@@ -302,63 +305,113 @@ async def send_message(
         session_manager: SessionManager dependency.
 
     Returns:
-        SendMessageResponse with generated events.
-
-    Raises:
-        HTTPException: If session is not found or message processing fails.
+        StreamingResponse with text/event-stream content type.
     """
     if session_manager is None:
         raise HTTPException(
             status_code=500,
-            detail=ErrorResponse(error="Service unavailable", detail="SessionManager not initialized").dict()
+            detail="SessionManager not initialized"
         )
 
-    try:
-        # Prepare message dict
-        user_msg = {
-            "role": "user",
-            "content": request.content,
-            "sender_id": request.sender_id
-        }
-
-        # Submit message for processing
-        future = await session_manager.process_message(session_id, user_msg)
-
-        # Wait for processing to complete
-        events = await future
-
-        # Get updated session for message count
-        ctx = await session_manager.get_session(session_id)
-        message_count = len(ctx.messages) if ctx else 0
-
-        # Convert events to dict format
-        event_dicts = [
-            {
-                "type": event.type,
-                "content": event.content,
-                "metadata": event.metadata,
-                "timestamp": event.timestamp.isoformat() if event.timestamp else None
+    async def event_generator():
+        try:
+            user_msg = {
+                "role": "user",
+                "content": request.content,
+                "sender_id": request.sender_id
             }
-            for event in events
-        ]
 
-        return SendMessageResponse(
-            session_id=session_id,
-            events=event_dicts,
-            message_count=message_count
-        )
-    except ValueError as e:
-        # Session not found
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(error="Session not found", detail=str(e)).dict()
-        )
-    except Exception as e:
-        logger.error(f"Error processing message in session {session_id}: {e}", exc_info=True)
+            async for event in session_manager.process_message_stream(session_id, user_msg):
+                event_data = {
+                    "type": event.type,
+                    "content": event.content,
+                    "metadata": event.metadata,
+                    "timestamp": event.timestamp.isoformat() if event.timestamp else None
+                }
+                yield f"data: {json.dumps(event_data)}\n\n"
+
+            yield f"data: {{\"type\": \"done\", \"content\": \"\"}}\n\n"
+
+        except ValueError as e:
+            error_data = {"type": "error", "content": str(e)}
+            yield f"data: {json.dumps(error_data)}\n\n"
+        except Exception as e:
+            logger.error(f"Error in stream processing session {session_id}: {e}", exc_info=True)
+            error_data = {"type": "error", "content": f"Processing error: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.post("/sessions/{session_id}/messages/stream")
+async def send_message_stream(
+    session_id: str,
+    request: SendMessageRequest,
+    session_manager: Optional[SessionManager] = Depends(get_session_manager)
+):
+    """Send a message to a session and receive streaming SSE response.
+
+    Args:
+        session_id: ID of the session to send message to.
+        request: SendMessageRequest containing message content.
+        session_manager: SessionManager dependency.
+
+    Returns:
+        StreamingResponse with text/event-stream content type.
+    """
+    if session_manager is None:
         raise HTTPException(
             status_code=500,
-            detail=ErrorResponse(error="Failed to process message", detail=str(e)).dict()
+            detail="SessionManager not initialized"
         )
+
+    async def event_generator():
+        try:
+            # Prepare message dict
+            user_msg = {
+                "role": "user",
+                "content": request.content,
+                "sender_id": request.sender_id
+            }
+
+            # Stream events as they are generated
+            async for event in session_manager.process_message_stream(session_id, user_msg):
+                event_data = {
+                    "type": event.type,
+                    "content": event.content,
+                    "metadata": event.metadata,
+                    "timestamp": event.timestamp.isoformat() if event.timestamp else None
+                }
+                yield f"data: {json.dumps(event_data)}\n\n"
+
+            # Send final done signal
+            yield f"data: {{\"type\": \"done\", \"content\": \"\"}}\n\n"
+
+        except ValueError as e:
+            error_data = {"type": "error", "content": str(e)}
+            yield f"data: {json.dumps(error_data)}\n\n"
+        except Exception as e:
+            logger.error(f"Error in stream processing session {session_id}: {e}", exc_info=True)
+            error_data = {"type": "error", "content": f"Processing error: {str(e)}"}
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @router.get("/sessions/{session_id}/messages", response_model=MessageHistoryResponse)

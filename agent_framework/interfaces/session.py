@@ -11,9 +11,12 @@ def utc_now() -> datetime:
 class Message(BaseModel):
     """Message data class representing a single message in a conversation."""
     role: str
-    content: str
+    content: Optional[str] = None
     sender_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=utc_now)
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
 
 class SessionContext(BaseModel):

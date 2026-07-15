@@ -6,9 +6,9 @@ multiple backends (Ollama, OpenAI, Anthropic) with a unified API.
 参考：详细设计.md 第9.1节
 """
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Dict, List, Optional, Union, Any
 
 
 class LLMProvider(str, Enum):
@@ -36,6 +36,39 @@ class LLMConfig:
     base_url: Optional[str] = None
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None
+
+
+from agent_framework.interfaces.llm_types import FunctionCall, ToolCall, ChatResponse as LLMChatResponse
+
+
+class ChatResponseType(str, Enum):
+    """Types of chat response events."""
+    CONTENT = "content"           # Text content chunk
+    TOOL_CALL_START = "tool_call_start"  # Tool call initiated
+    TOOL_CALL_CHUNK = "tool_call_chunk"  # Tool call arguments chunk (legacy name)
+    TOOL_CALL_ARGUMENT = "tool_call_argument"  # Tool call arguments chunk (preferred name)
+    TOOL_CALL_END = "tool_call_end"      # Tool call completed
+    DONE = "done"                 # Stream finished
+
+
+# Re-export LLMChatResponse as ChatResponse for backward compatibility
+ChatResponse = LLMChatResponse
+
+
+@dataclass
+class StreamChatResponse:
+    """Represents a chunk in a streaming chat response.
+
+    Attributes:
+        type: The type of response (content or tool_call event).
+        content: Text content (for CONTENT type).
+        tool_call: Tool call data (for TOOL_CALL_* types).
+        finish_reason: Why the stream ended (e.g., "stop", "tool_calls").
+    """
+    type: ChatResponseType = ChatResponseType.CONTENT
+    content: Optional[str] = None
+    tool_call: Optional[ToolCall] = None
+    finish_reason: Optional[str] = None
 
 
 class LLMGateway(ABC):
@@ -97,6 +130,57 @@ class LLMGateway(ABC):
 
         Yields:
             Tokens from the response as they are generated.
+
+        Raises:
+            KeyError: If the specified model alias is not configured.
+            RuntimeError: If the LLM request fails.
+        """
+        ...
+
+    @abstractmethod
+    async def chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> ChatResponse:
+        """Generate a chat response using messages array and optional tools.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions for function calling.
+            model: Model alias (defaults to "default").
+            **kwargs: Additional provider-specific parameters.
+
+        Returns:
+            ChatResponse with content and/or tool_calls.
+
+        Raises:
+            KeyError: If the specified model alias is not configured.
+            RuntimeError: If the LLM request fails.
+        """
+        ...
+
+    @abstractmethod
+    async def stream_chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> AsyncIterator[StreamChatResponse]:
+        """Generate a streaming chat response with tool call support.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions for function calling.
+            model: Model alias (defaults to "default").
+            **kwargs: Additional provider-specific parameters.
+
+        Yields:
+            StreamChatResponse objects representing content chunks,
+            tool call events (start/chunk/end), or final DONE event.
 
         Raises:
             KeyError: If the specified model alias is not configured.

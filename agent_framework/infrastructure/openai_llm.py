@@ -11,13 +11,18 @@ API endpoints:
 
 参考：详细设计.md 第9.1节
 """
+import json
 import logging
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Dict, Any, Optional
+from typing import AsyncIterator, Dict, List, Any, Optional
 
 import httpx
 
-from agent_framework.infrastructure.llm_gateway import LLMGateway, LLMConfig, LLMProvider
+from agent_framework.infrastructure.llm_gateway import (
+    LLMGateway, LLMConfig, LLMProvider,
+    ChatResponse, StreamChatResponse, ChatResponseType,
+    ToolCall, FunctionCall
+)
 
 # Module logger for debugging
 _logger = logging.getLogger("agent_framework.infrastructure.llm_debug")
@@ -162,6 +167,56 @@ class OpenAILLM(LLMGateway):
 
         return payload
 
+    def _build_chat_payload(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        stream: bool = False,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Build the request payload for chat completions API.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions.
+            stream: Whether to stream the response.
+            **kwargs: Additional parameters.
+
+        Returns:
+            Dictionary payload for the API request.
+        """
+        payload = {
+            "model": self._config.model,
+            "messages": messages,
+            "stream": stream,
+        }
+
+        # Add tools if provided
+        if tools:
+            payload["tools"] = tools
+
+        # Add temperature (from config or kwargs)
+        temperature = kwargs.get("temperature", self._config.temperature)
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        # Add max_tokens (from config or kwargs)
+        max_tokens = kwargs.get("max_tokens", self._config.max_tokens)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
+        # Add other optional parameters
+        if "top_p" in kwargs:
+            payload["top_p"] = kwargs["top_p"]
+        if "frequency_penalty" in kwargs:
+            payload["frequency_penalty"] = kwargs["frequency_penalty"]
+        if "presence_penalty" in kwargs:
+            payload["presence_penalty"] = kwargs["presence_penalty"]
+        if "stop" in kwargs:
+            payload["stop"] = kwargs["stop"]
+
+        return payload
+
     async def _call_openai_api(
         self,
         prompt: str,
@@ -208,6 +263,62 @@ class OpenAILLM(LLMGateway):
         except httpx.RequestError as e:
             raise RuntimeError(f"Failed to connect to OpenAI: {e}") from e
 
+    async def _call_chat_api(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        **kwargs
+    ) -> ChatResponse:
+        """Make a non-streaming chat API call.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions.
+            **kwargs: Additional parameters.
+
+        Returns:
+            ChatResponse with content and/or tool_calls.
+
+        Raises:
+            RuntimeError: If the API call fails.
+        """
+        client = self._get_client()
+        payload = self._build_chat_payload(messages, tools, stream=False, **kwargs)
+
+        # Debug logging for LLM request
+        _logger.debug(f"LLM Chat Request | model={self._config.model} | payload={payload}")
+
+        try:
+            response = await client.post(
+                self._completions_endpoint,
+                json=payload,
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            # Debug logging for LLM response
+            _logger.debug(f"LLM Chat Response | model={self._config.model} | result={result}")
+
+            # Extract content and tool_calls from response
+            choices = result.get("choices", [])
+            if not choices:
+                return ChatResponse(content="")
+
+            choice = choices[0]
+            message = choice.get("message", {})
+
+            content = message.get("content", "")
+            tool_calls = message.get("tool_calls", None)
+
+            return ChatResponse(content=content, tool_calls=tool_calls)
+
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(
+                f"OpenAI API error: {e.response.status_code} - {e.response.text}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Failed to connect to OpenAI: {e}") from e
+
     async def _stream_openai_api(
         self,
         prompt: str,
@@ -242,9 +353,9 @@ class OpenAILLM(LLMGateway):
                     if line:
                         _logger.debug(f"LLM Stream Raw | line={repr(line)}")
 
-                        # Skip empty lines and "data: [DONE]" marker
+                        # Skip empty lines and "data: [DONE]" marker (with or without space)
                         line = line.strip()
-                        if not line or line == "data: [DONE]":
+                        if not line or line == "data: [DONE]" or line == "data:[DONE]":
                             continue
 
                         # Remove "data:" or "data: " prefix if present
@@ -255,7 +366,6 @@ class OpenAILLM(LLMGateway):
                                 line = line[5:]
 
                         try:
-                            import json
                             # DEBUG: Log raw line before parsing
                             data = json.loads(line)
                             choices = data.get("choices", [])
@@ -269,6 +379,151 @@ class OpenAILLM(LLMGateway):
                         except Exception as e:
                             # Log malformed JSON lines - show repr to reveal invisible chars
                             _logger.warning(f"Failed to parse streaming response line: repr={repr(line)} | Length={len(line)} | Error: {e}")
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(f"OpenAI API error: {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Failed to connect to OpenAI: {e}") from e
+
+    async def _stream_chat_api(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        **kwargs
+    ) -> AsyncIterator[StreamChatResponse]:
+        """Make a streaming chat API call with tool call support.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions.
+            **kwargs: Additional parameters.
+
+        Yields:
+            StreamChatResponse objects.
+
+        Raises:
+            RuntimeError: If the API call fails.
+        """
+        client = self._get_client()
+        payload = self._build_chat_payload(messages, tools, stream=True, **kwargs)
+
+        # Debug logging for LLM streaming request
+        _logger.debug(f"LLM Stream Chat Request | model={self._config.model} | payload={payload}")
+
+        # Track tool calls for accumulation
+        tool_call_tracker: Dict[int, Dict[str, Any]] = {}
+
+        try:
+            async with client.stream(
+                "POST",
+                self._completions_endpoint,
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line:
+                        _logger.debug(f"LLM Stream Raw | line={repr(line)}")
+
+                        # Skip empty lines and "data: [DONE]" marker (with or without space)
+                        line = line.strip()
+                        if not line or line == "data: [DONE]" or line == "data:[DONE]":
+                            continue
+
+                        # Remove "data:" or "data: " prefix if present
+                        if line.startswith("data:"):
+                            if line.startswith("data: "):
+                                line = line[6:]
+                            else:
+                                line = line[5:]
+
+                        try:
+                            data = json.loads(line)
+                            choices = data.get("choices", [])
+                            if not choices:
+                                continue
+
+                            delta = choices[0].get("delta", {})
+                            finish_reason = choices[0].get("finish_reason")
+
+                            # Yield content tokens
+                            if delta.get("content"):
+                                yield StreamChatResponse(
+                                    type=ChatResponseType.CONTENT,
+                                    content=delta["content"]
+                                )
+
+                            # Process tool_calls
+                            if delta.get("tool_calls"):
+                                for tc_data in delta["tool_calls"]:
+                                    index = tc_data.get("index", 0)
+                                    tc_id = tc_data.get("id")
+                                    tc_type = tc_data.get("type", "function")
+                                    func_data = tc_data.get("function", {})
+                                    func_name = func_data.get("name", "")
+                                    func_args = func_data.get("arguments", "")
+
+                                    if index not in tool_call_tracker:
+                                        # New tool call
+                                        tool_call_tracker[index] = {
+                                            "id": tc_id,
+                                            "type": tc_type,
+                                            "name": func_name,
+                                            "arguments": func_args
+                                        }
+                                        yield StreamChatResponse(
+                                            type=ChatResponseType.TOOL_CALL_START,
+                                            tool_call=ToolCall(
+                                                id=tc_id or f"call_{index}",
+                                                type=tc_type,
+                                                function=FunctionCall(
+                                                    name=func_name,
+                                                    arguments=func_args
+                                                )
+                                            )
+                                        )
+                                    else:
+                                        # Appending to existing tool call
+                                        tool_call_tracker[index]["arguments"] += func_args
+                                        current_tc = tool_call_tracker[index]
+                                        yield StreamChatResponse(
+                                            type=ChatResponseType.TOOL_CALL_ARGUMENT,
+                                            tool_call=ToolCall(
+                                                id=current_tc["id"],
+                                                type=current_tc["type"],
+                                                function=FunctionCall(
+                                                    name=current_tc["name"],
+                                                    arguments=current_tc["arguments"]
+                                                )
+                                            )
+                                        )
+
+                            # Yield tool_call_end when tool calls are finished, then done
+                            if finish_reason == "tool_calls":
+                                # Yield TOOL_CALL_END for each tool call
+                                for tc_data in tool_call_tracker.values():
+                                    yield StreamChatResponse(
+                                        type=ChatResponseType.TOOL_CALL_END,
+                                        tool_call=ToolCall(
+                                            id=tc_data["id"],
+                                            type=tc_data["type"],
+                                            function=FunctionCall(
+                                                name=tc_data["name"],
+                                                arguments=tc_data["arguments"]
+                                            )
+                                        )
+                                    )
+                                yield StreamChatResponse(
+                                    type=ChatResponseType.DONE,
+                                    finish_reason=finish_reason
+                                )
+                            elif finish_reason:
+                                yield StreamChatResponse(
+                                    type=ChatResponseType.DONE,
+                                    finish_reason=finish_reason
+                                )
+
+                        except json.JSONDecodeError as e:
+                            _logger.warning(f"Failed to parse streaming response line: repr={repr(line)} | Error: {e}")
+
         except httpx.HTTPStatusError as e:
             raise RuntimeError(f"OpenAI API error: {e.response.status_code}") from e
         except httpx.RequestError as e:
@@ -310,6 +565,56 @@ class OpenAILLM(LLMGateway):
         """
         async for token in self._stream_openai_api(prompt, **kwargs):
             yield token
+
+    async def chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> ChatResponse:
+        """Generate a chat response using messages array and optional tools.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions for function calling.
+            model: Model alias (defaults to "default").
+            **kwargs: Additional provider-specific parameters.
+
+        Returns:
+            ChatResponse with content and/or tool_calls.
+
+        Raises:
+            KeyError: If the specified model alias is not configured.
+            RuntimeError: If the LLM request fails.
+        """
+        return await self._call_chat_api(messages, tools, **kwargs)
+
+    async def stream_chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> AsyncIterator[StreamChatResponse]:
+        """Generate a streaming chat response with tool call support.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions for function calling.
+            model: Model alias (defaults to "default").
+            **kwargs: Additional provider-specific parameters.
+
+        Yields:
+            StreamChatResponse objects representing content chunks,
+            tool call events (start/chunk/end), or final DONE event.
+
+        Raises:
+            KeyError: If the specified model alias is not configured.
+            RuntimeError: If the LLM request fails.
+        """
+        async for response in self._stream_chat_api(messages, tools, **kwargs):
+            yield response
 
     async def count_tokens(self, text: str) -> int:
         """Count tokens in text.

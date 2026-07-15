@@ -6,6 +6,7 @@ class BaseTool(ABC):
 
     name: str
     description: str
+    parameters: dict = {"type": "object", "properties": {}}
 
     @abstractmethod
     async def run(self, input: str, session_id: str = None, **kwargs) -> str:

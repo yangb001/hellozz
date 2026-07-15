@@ -5,16 +5,20 @@ with Ollama's local API (http://localhost:11434 by default).
 
 Ollama API endpoints:
 - POST /api/generate - Generate completion (supports streaming)
+- POST /api/chat - Chat completion using messages array (supports tools)
 - POST /api/embeddings - Get embeddings (used for tokenization fallback)
 
 参考：详细设计.md 第9.1节
 """
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Dict, Any, Optional
+from typing import AsyncIterator, Dict, Any, Optional, List
 
 import httpx
 
-from agent_framework.infrastructure.llm_gateway import LLMGateway, LLMConfig, LLMProvider
+from agent_framework.infrastructure.llm_gateway import (
+    LLMGateway, LLMConfig, LLMProvider, ChatResponse, StreamChatResponse,
+    ChatResponseType, ToolCall, FunctionCall
+)
 
 
 @dataclass
@@ -51,6 +55,7 @@ class OllamaLLM(LLMGateway):
 
     # API endpoints
     _generate_endpoint: str = "/api/generate"
+    _chat_endpoint: str = "/api/chat"
     _tokenize_endpoint: str = "/api/embeddings"
 
     def __init__(self, config: OllamaConfig):
@@ -283,6 +288,155 @@ class OllamaLLM(LLMGateway):
             # Fallback estimation
             words = len(text.split())
             return int(words * 1.3) if words > 0 else 0
+
+    async def chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> ChatResponse:
+        """Generate a chat response using Ollama's /api/chat endpoint.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions for function calling.
+            model: Model alias (ignored, uses configured model).
+            **kwargs: Additional parameters.
+
+        Returns:
+            ChatResponse with content and/or tool_calls.
+        """
+        client = self._get_client()
+
+        payload = {
+            "model": self._config.model,
+            "messages": messages,
+            "stream": False,
+        }
+
+        # Add tools if provided
+        if tools:
+            payload["tools"] = tools
+
+        # Add optional parameters
+        if "temperature" in kwargs:
+            payload["temperature"] = kwargs["temperature"]
+        if "num_predict" in kwargs:
+            payload["num_predict"] = kwargs["num_predict"]
+        if "max_tokens" in kwargs:
+            payload["num_predict"] = kwargs["max_tokens"]
+
+        try:
+            response = await client.post(
+                self._chat_endpoint,
+                json=payload,
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            # Extract content
+            content = result.get("message", {}).get("content", "")
+
+            # Extract tool calls if present
+            tool_calls = None
+            if "tool_calls" in result:
+                tool_calls = result["tool_calls"]
+
+            return ChatResponse(content=content, tool_calls=tool_calls)
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(f"Ollama API error: {e.response.status_code} - {e.response.text}") from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Failed to connect to Ollama: {e}") from e
+
+    async def stream_chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> AsyncIterator[StreamChatResponse]:
+        """Generate a streaming chat response using Ollama's /api/chat endpoint.
+
+        Args:
+            messages: List of message dicts with role and content.
+            tools: Optional list of tool definitions for function calling.
+            model: Model alias (ignored, uses configured model).
+            **kwargs: Additional parameters.
+
+        Yields:
+            StreamChatResponse objects representing content chunks,
+            tool call events, or final DONE event.
+        """
+        client = self._get_client()
+
+        payload = {
+            "model": self._config.model,
+            "messages": messages,
+            "stream": True,
+        }
+
+        # Add tools if provided
+        if tools:
+            payload["tools"] = tools
+
+        # Add optional parameters
+        if "temperature" in kwargs:
+            payload["temperature"] = kwargs["temperature"]
+        if "num_predict" in kwargs:
+            payload["num_predict"] = kwargs["num_predict"]
+
+        try:
+            async with client.stream(
+                "POST",
+                self._chat_endpoint,
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line:
+                        try:
+                            import json
+                            data = json.loads(line)
+
+                            # Check for content
+                            if "message" in data:
+                                msg = data["message"]
+                                content = msg.get("content", "")
+                                if content:
+                                    yield StreamChatResponse(
+                                        type=ChatResponseType.CONTENT,
+                                        content=content
+                                    )
+
+                                # Check for tool call
+                                if "tool_calls" in msg:
+                                    for tc in msg["tool_calls"]:
+                                        yield StreamChatResponse(
+                                            type=ChatResponseType.TOOL_CALL_END,
+                                            tool_call=ToolCall(
+                                                id=tc.get("id", ""),
+                                                type="function",
+                                                function=FunctionCall(
+                                                    name=tc.get("function", {}).get("name", ""),
+                                                    arguments=tc.get("function", {}).get("arguments", "")
+                                                )
+                                            )
+                                        )
+
+                            # Check for done/summary
+                            if data.get("done"):
+                                yield StreamChatResponse(
+                                    type=ChatResponseType.DONE,
+                                    finish_reason=data.get("done_reason")
+                                )
+                        except Exception:
+                            # Skip malformed JSON lines
+                            pass
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(f"Ollama API error: {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Failed to connect to Ollama: {e}") from e
 
     async def close(self) -> None:
         """Close the HTTP client.
