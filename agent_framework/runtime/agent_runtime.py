@@ -128,7 +128,7 @@ class AgentRuntime:
                             metadata=ToolCallEventData(
                                 tool_call_id=tc.id,
                                 tool_name=func_name,
-                                arguments="",
+                                arguments=func_args,
                                 is_complete=False
                             ).__dict__
                         )

@@ -40,8 +40,8 @@ class TestDataclassDefaults:
         assert cfg.vector_db == "lancedb"
         assert cfg.vector_path == "./data/vectors"
         assert cfg.embedding_model == "all-MiniLM-L6-v2"
-        assert cfg.extraction_trigger == "smart"
-        assert cfg.extraction_model == "ollama/llama3"
+        assert cfg.trigger == "smart"
+        assert cfg.model == "ollama/llama3"
 
     def test_llm_provider_config_defaults(self):
         """LLMProviderConfig 应有正确的默认值。"""
@@ -195,8 +195,8 @@ class TestLoadConfig:
             assert cfg.memory.vector_db == "chroma"
             assert cfg.memory.vector_path == "/test/vectors"
             assert cfg.memory.embedding_model == "custom-model"
-            assert cfg.memory.extraction_trigger == "every_n_turns"
-            assert cfg.memory.extraction_model == "custom/extractor"
+            assert cfg.memory.trigger == "every_n_turns"
+            assert cfg.memory.model == "custom/extractor"
             assert cfg.llm.default == "openai"
             assert "openai" in cfg.llm.providers
             assert cfg.llm.providers["openai"].model == "gpt-4"
@@ -365,7 +365,7 @@ class TestRoundTrip:
             memory=MemoryConfig(
                 short_term_size=50,
                 vector_db="chroma",
-                extraction_trigger="every_n_turns",
+                trigger="every_n_turns",
             ),
             llm=LLMConfig(
                 default="openai",
@@ -388,7 +388,7 @@ class TestRoundTrip:
             assert loaded.sqlite.path == original.sqlite.path
             assert loaded.memory.short_term_size == original.memory.short_term_size
             assert loaded.memory.vector_db == original.memory.vector_db
-            assert loaded.memory.extraction_trigger == original.memory.extraction_trigger
+            assert loaded.memory.trigger == original.memory.trigger
             assert loaded.llm.default == original.llm.default
             assert "openai" in loaded.llm.providers
             assert loaded.llm.providers["openai"].model == "gpt-4"

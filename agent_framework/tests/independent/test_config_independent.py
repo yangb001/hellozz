@@ -72,12 +72,12 @@ class TestMemoryConfig:
     def test_default_extraction_trigger(self):
         """Default extraction_trigger should be 'smart'."""
         cfg = MemoryConfig()
-        assert cfg.extraction_trigger == "smart"
+        assert cfg.trigger == "smart"
 
     def test_default_extraction_model(self):
         """Default extraction_model should be 'ollama/llama3'."""
         cfg = MemoryConfig()
-        assert cfg.extraction_model == "ollama/llama3"
+        assert cfg.model == "ollama/llama3"
 
     def test_custom_values(self):
         """MemoryConfig accepts custom values."""
@@ -86,16 +86,15 @@ class TestMemoryConfig:
             vector_db="chroma",
             vector_path="/tmp/vectors",
             embedding_model="custom-model",
-            extraction_trigger="every_n_turns:5",
-            extraction_model="openai/gpt-4",
+            trigger="every_n_turns:5",
+            model="openai/gpt-4",
         )
         assert cfg.short_term_size == 50
         assert cfg.vector_db == "chroma"
         assert cfg.vector_path == "/tmp/vectors"
         assert cfg.embedding_model == "custom-model"
-        assert cfg.extraction_trigger == "every_n_turns:5"
-        assert cfg.extraction_model == "openai/gpt-4"
-
+        assert cfg.trigger == "every_n_turns:5"
+        assert cfg.model == "openai/gpt-4"
 
 # ============================================================================
 # 2. LLMProviderConfig

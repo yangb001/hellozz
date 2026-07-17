@@ -65,8 +65,10 @@ class ChatMessage:
         content: Text content of the message.
         name: Optional name for the sender (used for tool messages).
         tool_call_id: Optional ID linking a tool result to its call.
+        tool_calls: Optional list of tool calls (for assistant messages with tool calls).
     """
     role: str
     content: str = ""
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None

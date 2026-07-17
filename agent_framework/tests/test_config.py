@@ -30,7 +30,7 @@ class TestMemoryConfig:
         assert config.vector_db == "lancedb"
         assert config.vector_path == "./data/vectors"
         assert config.embedding_model == "all-MiniLM-L6-v2"
-        assert config.extraction_trigger == "smart"
+        assert config.trigger == "smart"
         assert config.extraction_model == "ollama/llama3"
 
     def test_custom_values(self):
@@ -39,11 +39,11 @@ class TestMemoryConfig:
             short_term_size=50,
             vector_db="chroma",
             vector_path="/custom/path",
-            extraction_trigger="every_n:10",
+            trigger="every_n:10",
         )
         assert config.short_term_size == 50
         assert config.vector_db == "chroma"
-        assert config.extraction_trigger == "every_n:10"
+        assert config.trigger == "every_n:10"
 
 
 class TestLLMProviderConfig:
@@ -181,7 +181,7 @@ class TestLoadConfig:
             assert config.memory.short_term_size == 30
             assert config.memory.vector_db == "chroma"
             assert config.memory.embedding_model == "custom-model"
-            assert config.memory.extraction_trigger == "every_n:5"
+            assert config.memory.trigger == "every_n:5"
             assert config.llm.default == "openai"
             assert "openai" in config.llm.providers
             assert config.llm.providers["openai"].model == "gpt-4"

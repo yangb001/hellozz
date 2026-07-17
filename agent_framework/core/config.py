@@ -13,8 +13,9 @@ class MemoryConfig:
     vector_db: str = "lancedb"
     vector_path: str = "./data/vectors"
     embedding_model: str = "all-MiniLM-L6-v2"
-    extraction_trigger: str = "smart"
-    extraction_model: str = "ollama/llama3"
+    trigger: str = "smart"
+    model: str = "ollama/llama3"
+    every_n: int = 10
 
 
 @dataclass
@@ -96,8 +97,8 @@ class Config:
                 "vector_path": self.memory.vector_path,
                 "embedding_model": self.memory.embedding_model,
                 "extraction": {
-                    "trigger": self.memory.extraction_trigger,
-                    "model": self.memory.extraction_model,
+                    "trigger": self.memory.trigger,
+                    "model": self.memory.model,
                 },
             },
             "llm": {
@@ -188,8 +189,9 @@ def load_config(config_path: Optional[str] = None) -> Config:
         vector_db=memory_data.get("vector_db", "lancedb"),
         vector_path=memory_data.get("vector_path", "./data/vectors"),
         embedding_model=memory_data.get("embedding_model", "all-MiniLM-L6-v2"),
-        extraction_trigger=extraction_data.get("trigger", "smart"),
-        extraction_model=extraction_data.get("model", "ollama/llama3"),
+        trigger=extraction_data.get("trigger", "smart"),
+        model=extraction_data.get("model", "ollama/llama3"),
+        every_n=extraction_data.get("every_n", 10),
     )
 
     llm_providers = {}

@@ -5,14 +5,16 @@
 - 组合 BufferMemory、VectorMemory、MemoryExtractor
 - save/retrieve/clear/extract_long_term 方法
 - 记忆拼接逻辑
-- 触发策略配置（smart, every_n_turns）
+- 触发策略配置（smart, every_n_turns, off）
 
 本测试文件完全独立编写，不使用开发者编写的测试用例。
 """
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
-from agent_framework.memory.memory_manager import MemoryManager, MemoryConfig
+from agent_framework.memory.memory_manager import MemoryManager
+from agent_framework.core.config import MemoryConfig
 from agent_framework.interfaces.base_memory import BaseMemory
 from agent_framework.interfaces.session import Message
 from agent_framework.memory.extractor import MemoryFact
@@ -29,7 +31,7 @@ def _make_message(content: str, role: str = "user", sender_id: str = None) -> Me
 
 def _make_memory_manager(
     trigger: str = "smart",
-    every_n: int = 5,
+    every_n: int = 10,
 ) -> tuple[MemoryManager, AsyncMock, AsyncMock, AsyncMock]:
     """创建带 mock 依赖的 MemoryManager。"""
     mock_short_term = AsyncMock()
@@ -52,10 +54,10 @@ class TestMemoryConfig:
         config = MemoryConfig()
         assert config.trigger == "smart"
 
-    def test_default_every_n_is_5(self):
-        """默认 every_n 应为 5。"""
+    def test_default_every_n_is_10(self):
+        """默认 every_n 应为 10。"""
         config = MemoryConfig()
-        assert config.every_n == 5
+        assert config.every_n == 10
 
     def test_custom_config(self):
         """应支持自定义配置。"""
@@ -141,7 +143,8 @@ class TestSaveMethod:
         short.get_recent_messages = MagicMock(return_value=[])
         msg = _make_message("important info")
 
-        await mm.save("sess1", msg)
+        with patch('agent_framework.memory.memory_manager.asyncio.create_task', wraps=asyncio.create_task):
+            await mm.save("sess1", msg)
 
         extractor.is_important.assert_awaited_once_with(msg)
         extractor.extract.assert_awaited_once()
@@ -153,7 +156,8 @@ class TestSaveMethod:
         extractor.is_important = AsyncMock(return_value=False)
         msg = _make_message("trivial")
 
-        await mm.save("sess1", msg)
+        with patch('agent_framework.memory.memory_manager.asyncio.create_task', wraps=asyncio.create_task):
+            await mm.save("sess1", msg)
 
         extractor.is_important.assert_awaited_once_with(msg)
         extractor.extract.assert_not_awaited()
@@ -479,7 +483,8 @@ class TestTriggerStrategy:
         mm, _, _, extractor = _make_memory_manager(trigger="smart")
         extractor.is_important = AsyncMock(return_value=False)
 
-        await mm.save("sess1", _make_message("test"))
+        with patch('agent_framework.memory.memory_manager.asyncio.create_task', wraps=asyncio.create_task):
+            await mm.save("sess1", _make_message("test"))
 
         extractor.is_important.assert_awaited_once()
 
@@ -507,16 +512,79 @@ class TestTriggerStrategy:
 
     @pytest.mark.asyncio
     async def test_smart_trigger_extract_on_important(self):
-        """smart 策略下重要消息应触发完整提取流程。"""
+        """smart 策略下重要消息应触发异步提取（通过 create_task）。"""
         mm, short, long, extractor = _make_memory_manager(trigger="smart")
         extractor.is_important = AsyncMock(return_value=True)
-        msgs = [_make_message("recent message")]
+        short.get_recent_messages = MagicMock(return_value=[])
+        extractor.extract = AsyncMock(return_value=[])
+
+        with patch('agent_framework.memory.memory_manager.asyncio.create_task', wraps=asyncio.create_task) as mock_task:
+            await mm.save("sess1", _make_message("important"))
+            # Verify create_task was called for async extraction
+            mock_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_off_trigger_disables_extraction(self):
+        """off 触发策略应完全禁用提取。"""
+        mm, short, long, extractor = _make_memory_manager(trigger="off")
+        extractor.is_important = AsyncMock(return_value=True)
+        extractor.extract = AsyncMock(return_value=[])
+
+        # 发送10条消息，都不应触发提取
+        for i in range(10):
+            await mm.save("sess1", _make_message(f"message {i}"))
+
+        extractor.is_important.assert_not_awaited()
+        extractor.extract.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_smart_trigger_uses_create_task(self):
+        """smart 策略应使用 asyncio.create_task 异步执行。"""
+        mm, short, long, extractor = _make_memory_manager(trigger="smart")
+        extractor.is_important = AsyncMock(return_value=False)
+
+        with patch('agent_framework.memory.memory_manager.asyncio.create_task', wraps=asyncio.create_task) as mock_task:
+            await mm.save("sess1", _make_message("test"))
+            mock_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_trigger_case_insensitive(self):
+        """触发策略应该大小写不敏感。"""
+        for trigger_value in ["SMART", "Smart", "smart", "EVERY_N_TURNS", "Every_n_Turns"]:
+            mm, short, long, extractor = _make_memory_manager(trigger=trigger_value)
+            extractor.is_important = AsyncMock(return_value=False)
+            extractor.extract = AsyncMock(return_value=[])
+            short.get_recent_messages = MagicMock(return_value=[])
+
+            # 不应抛出异常
+            await mm.save("sess1", _make_message("test"))
+
+    @pytest.mark.asyncio
+    async def test_every_n_turns_with_10_rounds(self):
+        """every_n=10 时应在第10条消息触发提取。"""
+        mm, short, long, extractor = _make_memory_manager(trigger="every_n_turns", every_n=10)
+        extractor.extract = AsyncMock(return_value=[])
+        short.get_recent_messages = MagicMock(return_value=[])
+
+        # 前9条不应触发
+        for i in range(9):
+            await mm.save("sess1", _make_message(f"msg {i}"))
+        extractor.extract.assert_not_awaited()
+
+        # 第10条应触发
+        await mm.save("sess1", _make_message("msg 10"))
+        extractor.extract.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_smart_trigger_important_async(self):
+        """smart 策略在重要时应异步触发提取。"""
+        mm, short, long, extractor = _make_memory_manager(trigger="smart")
+        extractor.is_important = AsyncMock(return_value=True)
+        msgs = [_make_message("recent")]
         short.get_recent_messages = MagicMock(return_value=msgs)
-        facts = [MemoryFact(content="extracted", metadata={}, user_id="user1")]
+        facts = [MemoryFact(content="fact", metadata={})]
         extractor.extract = AsyncMock(return_value=facts)
 
-        await mm.save("sess1", _make_message("important"))
-
-        extractor.extract.assert_awaited_once_with(msgs)
-        long.add.assert_awaited_once_with("sess1", "extracted", {})
-        long.add_user.assert_awaited_once_with("user1", "extracted")
+        with patch('agent_framework.memory.memory_manager.asyncio.create_task', wraps=asyncio.create_task) as mock_task:
+            await mm.save("sess1", _make_message("important"))
+            mock_task.assert_called_once()

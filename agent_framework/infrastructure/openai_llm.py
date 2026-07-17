@@ -498,19 +498,27 @@ class OpenAILLM(LLMGateway):
 
                             # Yield tool_call_end when tool calls are finished, then done
                             if finish_reason == "tool_calls":
-                                # Yield TOOL_CALL_END for each tool call
-                                for tc_data in tool_call_tracker.values():
-                                    yield StreamChatResponse(
-                                        type=ChatResponseType.TOOL_CALL_END,
-                                        tool_call=ToolCall(
-                                            id=tc_data["id"],
-                                            type=tc_data["type"],
-                                            function=FunctionCall(
-                                                name=tc_data["name"],
-                                                arguments=tc_data["arguments"]
+                                # Handle edge case: MiniMax LLM may return finish_reason=tool_calls
+                                # but with empty delta.tool_calls, so tracker is empty
+                                if not tool_call_tracker:
+                                    _logger.warning(
+                                        f"LLM returned finish_reason=tool_calls but no tool_calls in delta. "
+                                        f"This may be a malformed response from the LLM."
+                                    )
+                                else:
+                                    # Yield TOOL_CALL_END for each tool call
+                                    for tc_data in tool_call_tracker.values():
+                                        yield StreamChatResponse(
+                                            type=ChatResponseType.TOOL_CALL_END,
+                                            tool_call=ToolCall(
+                                                id=tc_data["id"],
+                                                type=tc_data["type"],
+                                                function=FunctionCall(
+                                                    name=tc_data["name"],
+                                                    arguments=tc_data["arguments"]
+                                                )
                                             )
                                         )
-                                    )
                                 yield StreamChatResponse(
                                     type=ChatResponseType.DONE,
                                     finish_reason=finish_reason

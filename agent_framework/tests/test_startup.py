@@ -66,7 +66,7 @@ class TestComponentInitialization:
 
         planner = ReActPlanner()
         assert planner is not None
-        assert planner.name == "react"
+        assert planner.name == "tool_call"
 
     def test_calculator_tool_initialization(self):
         """Test CalculatorTool can be initialized."""

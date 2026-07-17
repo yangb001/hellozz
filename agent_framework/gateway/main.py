@@ -86,7 +86,8 @@ def build_session_manager() -> SessionManager:
     vector_memory = VectorMemory(vector_store=None)  # No vector store for now
     memory_extractor = MemoryExtractor(llm_gateway=llm_gateway)
     memory_config = MemoryConfig(
-        trigger=config.memory.extraction_trigger,
+        trigger=config.memory.trigger,
+        every_n=config.memory.every_n,
     )
     memory_manager = MemoryManager(
         short_term=buffer_memory,

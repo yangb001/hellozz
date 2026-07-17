@@ -116,7 +116,7 @@ class TestStreamingResponse:
     def test_streaming_removes_on_finalize(self, html_content):
         """finalizeStreaming should remove the streaming element."""
         func_match = re.search(
-            r'function finalizeStreaming\(\)\s*\{(.+?)\n\s*\}',
+            r'function finalizeStreaming\(\).*?\n(.*?)(?=\n        function |\Z)',
             html_content,
             re.DOTALL
         )
@@ -416,7 +416,7 @@ class TestCodeQualityReview:
     def test_no_memory_leak_on_finalize(self, html_content):
         """finalizeStreaming should clean up references."""
         func_match = re.search(
-            r'function finalizeStreaming\(\)\s*\{(.+?)\n\s*\}',
+            r'function finalizeStreaming\(\).*?\n(.*?)(?=\n        function |\Z)',
             html_content,
             re.DOTALL
         )
@@ -468,7 +468,7 @@ class TestCodeQualityReview:
     def test_streaming_null_check_in_finalize(self, html_content):
         """finalizeStreaming should check if streamingElement exists."""
         func_match = re.search(
-            r'function finalizeStreaming\(\)\s*\{(.+?)\n\s*\}',
+            r'function finalizeStreaming\(\).*?\n(.*?)(?=\n        function |\Z)',
             html_content,
             re.DOTALL
         )

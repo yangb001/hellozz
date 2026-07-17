@@ -6,8 +6,11 @@ arithmetic, parentheses, and built-in math functions like abs().
 """
 import ast
 import operator
+import logging
 import math
 from agent_framework.interfaces.base_tool import BaseTool
+
+logger = logging.getLogger(__name__)
 
 
 # Supported binary operators
@@ -102,6 +105,16 @@ class Calculator(BaseTool):
         "Input should be a math expression (e.g., '2 + 3 * 4', '(10 - 2) / 3'). "
         "Supports +, -, *, /, //, %, **, parentheses, and functions like abs(), round()."
     )
+    parameters: dict = {
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": "The mathematical expression to evaluate (e.g., '100+100', '2*3.14')"
+            }
+        },
+        "required": ["input"]
+    }
 
     async def run(self, input: str, session_id: str = None, **kwargs) -> str:
         """Evaluate a mathematical expression.

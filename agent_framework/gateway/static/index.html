@@ -622,10 +622,24 @@
         // Streaming state
         let streamingElement = null;
         let streamingContent = '';
+        let streamingContentPreserved = '';
         let reasoningElement = null;
         let reasoningContent = '';
         let currentToolCall = null;
         let toolCallElement = null;
+
+        // Handle stream end - unified logic for both WebSocket and SSE
+        function handleStreamEnd() {
+            const preservedContent = streamingContentPreserved || streamingContent;
+            finalizeStreaming();
+            finalizeReasoning();
+            if (preservedContent) {
+                appendMessage('assistant', preservedContent, new Date().toISOString());
+            }
+            isProcessing = false;
+            updateSendButton();
+            hideTypingIndicator();
+        }
 
         // Handle WebSocket message
         function handleWebSocketMessage(data) {
@@ -656,7 +670,10 @@
             if (data.type === 'final_answer' || data.type === 'response') {
                 finalizeStreaming();
                 finalizeReasoning();
-                appendMessage('assistant', data.content, data.timestamp);
+                // Use preserved streaming content if available, otherwise use data.content
+                const finalContent = streamingContentPreserved || data.content;
+                streamingContentPreserved = ''; // Clear preserved content
+                appendMessage('assistant', finalContent, data.timestamp);
                 isProcessing = false;
                 updateSendButton();
                 hideTypingIndicator();
@@ -686,6 +703,9 @@
                     toolCallElement = null;
                     currentToolCall = null;
                 }
+            } else if (data.type === 'streaming_end' || data.type === 'done') {
+                console.debug('[WS Client] Stream end received, resetting state');
+                handleStreamEnd();
             }
         }
 
@@ -716,10 +736,13 @@
             }
         }
 
-        // Finalize streaming message - remove or convert to regular message
+        // Finalize streaming message - preserve content before removing
         function finalizeStreaming() {
             if (streamingElement) {
-                // Remove the streaming element; the final_answer will replace it
+                const bubble = streamingElement.querySelector('.message-bubble');
+                if (bubble) {
+                    streamingContentPreserved = bubble.textContent || streamingContent;
+                }
                 streamingElement.remove();
                 streamingElement = null;
                 streamingContent = '';
@@ -861,6 +884,7 @@
                                     // Check for done/streaming_end signal
                                     if (data.type === 'done' || data.type === 'streaming_end') {
                                         console.debug('[SSE Client] Received stream end signal');
+                                        handleStreamEnd();
                                         continue;
                                     }
                                     handleWebSocketMessage(data);

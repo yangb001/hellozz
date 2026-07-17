@@ -7,7 +7,6 @@ coherent memory system for agent sessions.
 参考：详细设计.md 第6.1节
 """
 import asyncio
-from dataclasses import dataclass, field
 from typing import List, Optional
 
 from agent_framework.interfaces.base_memory import BaseMemory
@@ -15,20 +14,7 @@ from agent_framework.interfaces.session import Message
 from agent_framework.memory.buffer_memory import BufferMemory
 from agent_framework.memory.vector_memory import VectorMemory
 from agent_framework.memory.extractor import MemoryExtractor
-
-
-@dataclass
-class MemoryConfig:
-    """Configuration for memory management behavior.
-
-    Attributes:
-        trigger: Strategy for triggering long-term memory extraction.
-                 - "smart": Use LLM to check message importance on every save.
-                 - "every_n_turns": Trigger extraction every N messages per session.
-        every_n: Number of turns between extractions when trigger is "every_n_turns".
-    """
-    trigger: str = "smart"
-    every_n: int = 5
+from agent_framework.core.config import MemoryConfig
 
 
 class MemoryManager(BaseMemory):
@@ -71,14 +57,16 @@ class MemoryManager(BaseMemory):
         """
         await self.short_term.add(session_id, message)
 
-        if self.config.trigger == "smart":
-            if await self.extractor.is_important(message):
-                await self.extract_long_term(session_id, force=True)
-        elif self.config.trigger == "every_n_turns":
+        trigger = self.config.trigger.lower() if self.config.trigger else ""
+        if trigger == "smart":
+            # Run importance check and extraction asynchronously to avoid blocking the agent
+            asyncio.create_task(self._smart_extract(session_id, message))
+        elif trigger == "every_n_turns":
             self._turn_counter[session_id] = self._turn_counter.get(session_id, 0) + 1
             if self._turn_counter[session_id] >= self.config.every_n:
                 self._turn_counter[session_id] = 0
                 await self.extract_long_term(session_id)
+        # else: trigger is "off" or unknown - do nothing
 
     async def retrieve(
         self,
@@ -113,6 +101,20 @@ class MemoryManager(BaseMemory):
                 user_ctx += mem
 
         return f"{user_ctx}\n{long_ctx}\nRecent: {short_ctx}"
+
+    async def _smart_extract(self, session_id: str, message: Message) -> None:
+        """Asynchronously check message importance and extract if important.
+
+        Args:
+            session_id: Unique identifier for the session.
+            message: Message to check for importance.
+        """
+        try:
+            if await self.extractor.is_important(message):
+                await self.extract_long_term(session_id, force=True)
+        except Exception as e:
+            logger = __import__('logging').getLogger(__name__)
+            logger.warning(f"Failed to extract long-term memory: {e}")
 
     async def clear(self, session_id: str) -> None:
         """Clear all memories for a session.
