@@ -126,8 +126,8 @@ class TestEventTypeEnum:
         assert EventType.ERROR.value == "error"
 
     def test_member_count(self):
-        """EventType must have exactly 6 members."""
-        assert len(list(EventType)) == 6
+        """EventType must have exactly 16 members."""
+        assert len(list(EventType)) == 16
 
     def test_all_values_lowercase(self):
         """All values must be lowercase strings."""

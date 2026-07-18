@@ -10,6 +10,7 @@ Ollama API endpoints:
 
 参考：详细设计.md 第9.1节
 """
+import json
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Dict, Any, Optional, List
 
@@ -187,7 +188,7 @@ class OllamaLLM(LLMGateway):
                 async for line in response.aiter_lines():
                     if line:
                         try:
-                            data = httpx._content.json.loads(line)
+                            data = json.loads(line)
                             if "response" in data and data["response"]:
                                 yield data["response"]
                         except Exception:
@@ -338,10 +339,21 @@ class OllamaLLM(LLMGateway):
             # Extract content
             content = result.get("message", {}).get("content", "")
 
-            # Extract tool calls if present
+            # Parse raw tool_calls dicts into ToolCall objects
+            raw_tool_calls = result.get("tool_calls", None) or result.get("message", {}).get("tool_calls", None)
             tool_calls = None
-            if "tool_calls" in result:
-                tool_calls = result["tool_calls"]
+            if raw_tool_calls:
+                tool_calls = [
+                    ToolCall(
+                        id=tc.get("id", ""),
+                        type=tc.get("type", "function"),
+                        function=FunctionCall(
+                            name=tc.get("function", {}).get("name", ""),
+                            arguments=tc.get("function", {}).get("arguments", "")
+                        )
+                    )
+                    for tc in raw_tool_calls
+                ]
 
             return ChatResponse(content=content, tool_calls=tool_calls)
         except httpx.HTTPStatusError as e:
@@ -396,7 +408,6 @@ class OllamaLLM(LLMGateway):
                 async for line in response.aiter_lines():
                     if line:
                         try:
-                            import json
                             data = json.loads(line)
 
                             # Check for content
@@ -412,14 +423,33 @@ class OllamaLLM(LLMGateway):
                                 # Check for tool call
                                 if "tool_calls" in msg:
                                     for tc in msg["tool_calls"]:
+                                        tc_id = tc.get("id", "")
+                                        func_data = tc.get("function", {})
+                                        func_name = func_data.get("name", "")
+                                        func_args = func_data.get("arguments", "")
+
+                                        # Yield TOOL_CALL_START first
+                                        yield StreamChatResponse(
+                                            type=ChatResponseType.TOOL_CALL_START,
+                                            tool_call=ToolCall(
+                                                id=tc_id,
+                                                type="function",
+                                                function=FunctionCall(
+                                                    name=func_name,
+                                                    arguments=func_args
+                                                )
+                                            )
+                                        )
+
+                                        # Then yield TOOL_CALL_END
                                         yield StreamChatResponse(
                                             type=ChatResponseType.TOOL_CALL_END,
                                             tool_call=ToolCall(
-                                                id=tc.get("id", ""),
+                                                id=tc_id,
                                                 type="function",
                                                 function=FunctionCall(
-                                                    name=tc.get("function", {}).get("name", ""),
-                                                    arguments=tc.get("function", {}).get("arguments", "")
+                                                    name=func_name,
+                                                    arguments=func_args
                                                 )
                                             )
                                         )

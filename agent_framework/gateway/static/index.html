@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Agent Framework</title>
+    <link rel="stylesheet" href="/static/css/thinking.css">
     <style>
         * {
             margin: 0;
@@ -413,6 +414,7 @@
         </div>
 
         <div id="chatContent">
+            <div id="thinking-container"></div>
             <div class="empty-state">
                 <svg viewBox="0 0 24 24" fill="currentColor">
                     <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
@@ -434,6 +436,7 @@
         </div>
     </div>
 
+    <script src="/static/js/thinking.js"></script>
     <script>
         // State
         let currentSessionId = null;
@@ -519,6 +522,12 @@
             updateSendButton();
             hideTypingIndicator();
             finalizeStreaming();
+            streamingContentPreserved = '';
+
+            // Clear thinking component
+            if (thinkingComponent) {
+                thinkingComponent.clear();
+            }
 
             // Update UI
             document.getElementById('chatHeader').style.display = 'flex';
@@ -551,12 +560,15 @@
         // Render messages
         function renderMessages(messages) {
             const container = document.getElementById('chatContent');
-            container.innerHTML = '<div class="chat-messages" id="messageList"></div>';
+            container.innerHTML = '<div id="thinking-container"></div><div class="chat-messages" id="messageList"></div>';
 
             const list = document.getElementById('messageList');
             messages.forEach(msg => {
                 appendMessage(msg.role, msg.content, msg.timestamp);
             });
+
+            // Re-initialize thinking component with new container
+            thinkingComponent = new ThinkingComponent('thinking-container');
 
             scrollToBottom();
         }
@@ -601,21 +613,17 @@
 
             ws.onclose = () => {
                 updateStatus(false);
-                // Reset processing state when connection drops
-                isProcessing = false;
-                updateSendButton();
-                hideTypingIndicator();
-                finalizeStreaming();
+                // Use handleStreamEnd to show accumulated content if connection drops
+                // before final_answer arrived. If final_answer was already processed,
+                // this is a no-op (preserved content is empty).
+                handleStreamEnd();
             };
 
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 updateStatus(false);
-                // Reset processing state on error
-                isProcessing = false;
-                updateSendButton();
-                hideTypingIndicator();
-                finalizeStreaming();
+                // Use handleStreamEnd to show accumulated content on error.
+                handleStreamEnd();
             };
         }
 
@@ -628,7 +636,9 @@
         let currentToolCall = null;
         let toolCallElement = null;
 
-        // Handle stream end - unified logic for both WebSocket and SSE
+        // Handle stream end - unified logic for WebSocket close/error only
+        // This is a safety net: if the connection drops before final_answer arrives,
+        // we still show whatever content was accumulated during streaming.
         function handleStreamEnd() {
             const preservedContent = streamingContentPreserved || streamingContent;
             finalizeStreaming();
@@ -641,9 +651,23 @@
             hideTypingIndicator();
         }
 
+        // Handle streaming_end event from backend - just finalize the streaming element
+        // without adding a message. The final_answer event will add the message.
+        function handleStreamingEndEvent() {
+            finalizeStreaming();
+            finalizeReasoning();
+        }
+
         // Handle WebSocket message
         function handleWebSocketMessage(data) {
             console.debug('[WS Client] handleWebSocketMessage called with type:', data.type);
+
+            // Handle thinking events
+            if (data.type && data.type.startsWith('thinking_')) {
+                handleThinkingEvent(data);
+                return;
+            }
+
             if (data.type === 'error') {
                 finalizeStreaming();
                 appendMessage('system', `错误: ${data.content}`, new Date().toISOString());
@@ -677,7 +701,19 @@
                 isProcessing = false;
                 updateSendButton();
                 hideTypingIndicator();
-            } else if (data.type === 'thought') {
+                return;
+            }
+
+            if (data.type === 'streaming_end' || data.type === 'done') {
+                // Do NOT add a message here. Just finalize the streaming element
+                // (preserving its content). The final_answer event will add the message.
+                // This prevents duplicate messages when streaming_end arrives before final_answer.
+                console.debug('[WS Client] Stream end received, preserving content for final_answer');
+                handleStreamingEndEvent();
+                return;
+            }
+
+            if (data.type === 'thought') {
                 console.log('Agent thinking:', data.content);
             } else if (data.type === 'action') {
                 console.log('Agent action:', data.content);
@@ -694,8 +730,13 @@
                 toolCallElement = createToolCallElement(currentToolCall.name);
             } else if (data.type === 'tool_call_argument') {
                 if (currentToolCall) {
-                    // 优先使用 data.content，兼容 metadata.arguments_fragment
-                    currentToolCall.arguments += data.content || data.metadata?.arguments_fragment || '';
+                    // The backend sends FULL accumulated arguments each time,
+                    // so REPLACE (not append) to avoid duplication.
+                    // Fall back to metadata.arguments_fragment for compatibility.
+                    const newArgs = data.content || data.metadata?.arguments_fragment || '';
+                    if (newArgs) {
+                        currentToolCall.arguments = newArgs;
+                    }
                 }
             } else if (data.type === 'tool_call_end') {
                 if (toolCallElement) {
@@ -703,9 +744,6 @@
                     toolCallElement = null;
                     currentToolCall = null;
                 }
-            } else if (data.type === 'streaming_end' || data.type === 'done') {
-                console.debug('[WS Client] Stream end received, resetting state');
-                handleStreamEnd();
             }
         }
 
@@ -881,10 +919,12 @@
                                     const data = JSON.parse(dataStr);
                                     console.debug('[SSE Client] Received:', data);
                                     console.debug('[SSE Client] data.type:', data.type, 'data.content:', data.content);
-                                    // Check for done/streaming_end signal
+                                    // For done/streaming_end in SSE, just finalize streaming element
+                                    // without adding message. The final_answer event handles message display.
+                                    // The 'done' signal from REST endpoint is handled after the loop.
                                     if (data.type === 'done' || data.type === 'streaming_end') {
-                                        console.debug('[SSE Client] Received stream end signal');
-                                        handleStreamEnd();
+                                        console.debug('[SSE Client] Received stream end signal, preserving content');
+                                        handleStreamingEndEvent();
                                         continue;
                                     }
                                     handleWebSocketMessage(data);
@@ -896,12 +936,19 @@
                     }
                 } catch (error) {
                     console.error('Error sending message:', error);
+                    // Clean up streaming state without adding a message
+                    finalizeStreaming();
+                    streamingContentPreserved = ''; // Clear so handleStreamEnd won't duplicate
                     appendMessage('system', '发送失败: ' + error.message, new Date().toISOString());
-                } finally {
                     isProcessing = false;
                     updateSendButton();
                     hideTypingIndicator();
-                    finalizeStreaming();
+                } finally {
+                    // Safety net: if final_answer was never received (e.g., stream ended
+                    // abnormally without error), use handleStreamEnd to show whatever
+                    // content was accumulated. If final_answer already handled everything,
+                    // preservedContent will be empty and this is a no-op.
+                    handleStreamEnd();
                 }
             }
         }

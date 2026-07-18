@@ -53,7 +53,7 @@ class ChatResponse:
     @property
     def has_tool_calls(self) -> bool:
         """Check if response contains tool calls."""
-        return len(self.tool_calls) > 0
+        return self.tool_calls is not None and len(self.tool_calls) > 0
 
 
 @dataclass

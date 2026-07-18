@@ -1,5 +1,5 @@
 """Interfaces module - Abstract base classes and data models."""
-from .events import Event
+from .events import Event, ThinkingData
 from .session import SessionContext, Message
 from .base_memory import BaseMemory
 from .base_planner import BasePlanner
@@ -24,6 +24,7 @@ from .llm_types import (
 
 __all__ = [
     "Event",
+    "ThinkingData",
     "SessionContext",
     "Message",
     "BaseMemory",

@@ -1,27 +1,10 @@
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 from datetime import datetime, timezone
 from dataclasses import dataclass
 
-
-class EventType:
-    """Event type constants for agent execution events."""
-
-    # Core event types
-    THOUGHT = "thought"
-    ACTION = "action"
-    OBSERVATION = "observation"
-    TEXT_TOKEN = "text_token"
-    FINAL_ANSWER = "final_answer"
-    ERROR = "error"
-
-    # Streaming event types
-    REASONING_CONTENT = "reasoning_content"
-    TOOL_CALL_START = "tool_call_start"
-    TOOL_CALL_ARGUMENT = "tool_call_argument"
-    TOOL_CALL_END = "tool_call_end"
-    STREAMING_START = "streaming_start"
-    STREAMING_END = "streaming_end"
+# EventType is defined in enums.py - re-export here for backward compatibility
+from .enums import EventType
 
 
 @dataclass
@@ -69,6 +52,23 @@ class ReasoningEventData:
     is_complete: bool = False
 
 
+class ThinkingData(BaseModel):
+    """Thinking process data.
+
+    Attributes:
+        step: Thinking step number.
+        label: Step label (e.g., "analyze problem", "select tool").
+        content: Thinking content.
+        duration_ms: Duration in milliseconds.
+        token_count: Token count.
+    """
+    step: int = 0
+    label: str = ""
+    content: str = ""
+    duration_ms: Optional[int] = None
+    token_count: Optional[int] = None
+
+
 class Event(BaseModel):
     """Event data class representing a single event in agent execution.
 
@@ -77,8 +77,12 @@ class Event(BaseModel):
         content: Text content of the event.
         metadata: Additional event metadata.
         timestamp: Event timestamp, defaults to current UTC time.
+        thinking: Thinking process data for thinking events.
+        sequence: Event sequence number.
     """
     type: str
     content: str = ""
-    metadata: dict = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=utc_now)
+    thinking: Optional[ThinkingData] = None
+    sequence: int = 0

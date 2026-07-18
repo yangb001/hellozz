@@ -8,21 +8,33 @@ Uses the chat completions API format with messages array
 and tool_calls support.
 
 参考：详细设计.md 第7节
+
+重构说明 (Phase 2A):
+- 使用 PlannerContext 显式传递状态，移除副作用状态
+- 集成 ThinkingRecorder 记录思考过程
+- 使用 EventType 枚举替代字符串比较
+- 方法签名简化，只接收 PlannerContext 和 llm_call
+
+重构说明 (Phase 3):
+- 统一流式和非流式处理路径
+- 添加 _process_events 方法统一处理所有事件
+- 添加 _handle_thinking_event 方法处理思考事件
+- 添加 _execute_tool_from_ctx 方法从上下文执行工具
+- 简化 plan_and_act 和 _handle_chat_response
 """
+import asyncio
 import json
 import logging
-from typing import AsyncIterator, Dict, Any, Optional, List
+from typing import AsyncIterator, Dict, Any, List
 
 from agent_framework.interfaces.base_planner import BasePlanner
-from agent_framework.interfaces.session import SessionContext, Message
-from agent_framework.interfaces.base_memory import BaseMemory
-from agent_framework.interfaces.base_tool import BaseTool
 from agent_framework.interfaces.events import Event
+from agent_framework.interfaces.enums import EventType
+from agent_framework.interfaces.llm_types import FunctionCall, ToolCall, ChatResponse, ChatMessage
+from agent_framework.core.planner_context import PlannerContext
+from agent_framework.core.thinking_recorder import ThinkingRecorder
 
 logger = logging.getLogger(__name__)
-
-
-from agent_framework.interfaces.llm_types import FunctionCall, ToolCall, ChatResponse, ChatMessage
 
 
 class ToolCallPlanner(BasePlanner):
@@ -35,6 +47,8 @@ class ToolCallPlanner(BasePlanner):
 
     This implementation uses the modern chat completions API format
     with messages array instead of prompt string manipulation.
+
+    重构后使用 PlannerContext 显式传递所有状态，避免副作用。
 
     Attributes:
         name: Planner identifier, defaults to "tool_call".
@@ -57,236 +71,318 @@ class ToolCallPlanner(BasePlanner):
         self.description = description or self.description
         self.max_iterations = max_iterations
 
+    async def _process_events(
+        self,
+        events: AsyncIterator,
+        ctx: PlannerContext
+    ) -> AsyncIterator[Event]:
+        """统一处理所有流式事件
+
+        Args:
+            events: 事件流
+            ctx: 规划器上下文
+
+        Yields:
+            处理后的事件
+        """
+        async for event in events:
+            # 处理思考事件
+            if event.type in (
+                EventType.THINKING_START.value,
+                EventType.THINKING_CONTENT.value,
+                EventType.THINKING_END.value
+            ):
+                self._handle_thinking_event(event, ctx)
+                yield event
+                continue
+
+            # 处理内容事件
+            if event.type in (EventType.CONTENT_TOKEN.value, EventType.TEXT_TOKEN.value):
+                ctx.add_text(event.content)
+                yield event
+                continue
+
+            # 处理工具调用开始
+            if event.type == EventType.TOOL_CALL_START.value:
+                tool_name = event.metadata.get("tool_name", "") if event.metadata else ""
+                tool_call_id = event.metadata.get("tool_call_id", "") if event.metadata else ""
+                initial_args = event.metadata.get("arguments", "") if event.metadata else ""
+                ctx.pending_tool_call = {
+                    "tool_name": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "arguments": initial_args
+                }
+                ctx.accumulated_args = initial_args
+                yield event
+                continue
+
+            # 处理工具调用参数 (full accumulated, replace)
+            if event.type == EventType.TOOL_CALL_ARGUMENT.value:
+                arg_content = event.content if event.content else ""
+                if arg_content:
+                    ctx.accumulated_args = arg_content
+                if ctx.pending_tool_call:
+                    ctx.pending_tool_call["arguments"] = ctx.accumulated_args
+                yield event
+                continue
+
+            # 处理工具调用结束
+            if event.type == EventType.TOOL_CALL_END.value:
+                if ctx.pending_tool_call:
+                    # 执行工具
+                    result, is_error = await self._execute_tool_from_ctx(ctx)
+
+                    yield Event(
+                        type=EventType.ACTION.value,
+                        content=f"Calling {ctx.completed_tool_calls[-1]['tool_name']}..."
+                    )
+                    if is_error:
+                        yield Event(type=EventType.ERROR.value, content=result)
+                    else:
+                        yield Event(type=EventType.OBSERVATION.value, content=result)
+                yield event
+                continue
+
+            # 处理最终答案
+            if event.type == EventType.FINAL_ANSWER.value:
+                yield event
+                return
+
+            # 处理流结束
+            if event.type == EventType.STREAMING_END.value:
+                if not ctx.has_completed_tool_calls():
+                    yield Event(type=EventType.FINAL_ANSWER.value, content=ctx.get_accumulated_text())
+                return
+
+            # 其他事件，直接转发
+            yield event
+
+    def _handle_thinking_event(self, event: Event, ctx: PlannerContext):
+        """处理思考事件
+
+        Args:
+            event: 思考事件
+            ctx: 规划器上下文
+        """
+        if event.type == EventType.THINKING_START.value:
+            label = event.thinking.label if event.thinking else ""
+            ctx.thinking_recorder.start_thinking(label)
+
+        elif event.type == EventType.THINKING_CONTENT.value:
+            ctx.thinking_recorder.add_content(event.content)
+
+        elif event.type == EventType.THINKING_END.value:
+            ctx.thinking_recorder.end_thinking()
+
+    async def _execute_tool_from_ctx(self, ctx: PlannerContext):
+        """从上下文执行工具
+
+        Args:
+            ctx: 规划器上下文
+
+        Returns:
+            Tuple of (result, is_error): result 是执行结果字符串，is_error 标识是否为错误
+        """
+        tool_call = ctx.pending_tool_call
+        if not tool_call:
+            return "Error: No pending tool call", True
+
+        tool_name = tool_call.get("tool_name", "")
+        tool_call_id = tool_call.get("tool_call_id", "")
+        arguments = tool_call.get("arguments", "")
+
+        # Parse tool arguments
+        try:
+            tool_args = json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError:
+            tool_args = {"input": arguments}
+
+        # Execute tool
+        if not ctx.tool_executor.has_tool(tool_name):
+            error_msg = f"Unknown tool: {tool_name}"
+            logger.error(error_msg)
+            # Track completed call for message building
+            ctx.completed_tool_calls.append({
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "arguments": arguments
+            })
+            ctx.add_tool_result(tool_call_id, f"Error: {error_msg}")
+            ctx.pending_tool_call = None
+            ctx.accumulated_args = ""
+            return f"Error: {error_msg}", True
+
+        try:
+            result = await ctx.execute_tool(tool_name, tool_args)
+            # Track completed call for message building
+            ctx.completed_tool_calls.append({
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "arguments": arguments
+            })
+            ctx.add_tool_result(tool_call_id, result)
+            ctx.pending_tool_call = None
+            ctx.accumulated_args = ""
+            return result, False
+        except Exception as e:
+            error_msg = f"Error executing tool {tool_name}: {e}"
+            logger.error(error_msg, exc_info=True)
+            ctx.completed_tool_calls.append({
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "arguments": arguments
+            })
+            ctx.add_tool_result(tool_call_id, f"Error: {error_msg}")
+            ctx.pending_tool_call = None
+            ctx.accumulated_args = ""
+            return f"Error: {error_msg}", True
+
     async def plan_and_act(
         self,
-        ctx: SessionContext,
-        memory: BaseMemory,
-        tools: Dict[str, Any],
+        ctx: PlannerContext,
         llm_call: callable,
     ) -> AsyncIterator[Event]:
         """Execute ToolCall planning loop, yielding events.
 
+        使用 PlannerContext 显式传递所有状态：
+        - ctx.messages: 消息列表（替代原来的 messages 局部变量）
+        - ctx.tools: 工具字典（替代原来的 tools 参数）
+        - ctx.memory: 记忆系统（替代原来的 memory 参数）
+        - ctx.session_id: 会话 ID（替代原来的 ctx.session_id）
+
         Args:
-            ctx: Current session context with messages and state.
-            memory: Memory system for retrieving relevant context.
-            tools: Dictionary of available tools by name.
-            llm_call: Async callable that takes (messages, tools) and returns ChatResponse.
+            ctx: PlannerContext containing all planner state.
+            llm_call: Async callable that takes (messages, tools) and returns ChatResponse or async iterator.
 
         Yields:
             Event objects representing thoughts, actions, observations, and final answer.
         """
+        # 清理思考记录器
+        ctx.thinking_recorder.clear()
+
         # Build initial messages array
-        messages = await self._build_messages(ctx, memory, tools)
+        system_message = await self._build_system_message(ctx)
+        ctx.messages.insert(0, system_message)
 
-        iteration = 0
-        has_tool_calls = True  # Start with true to enter loop on first iteration
+        while not ctx.is_max_iterations_reached():
+            ctx.increment_iteration()
+            logger.debug(f"ToolCall iteration {ctx.iteration}/{ctx.max_iterations}")
 
-        while has_tool_calls and iteration < self.max_iterations:
-            iteration += 1
-            logger.debug(f"ToolCall iteration {iteration}/{self.max_iterations}")
-            has_tool_calls = False  # Reset, will be set true if tool calls found
-
-            # Call LLM with messages and tools
             # Convert ChatMessage objects to dicts for JSON serialization
             try:
-                # Re-convert messages to dicts each iteration to include newly added tool results
-                messages_dicts = [self._chat_message_to_dict(m) for m in messages]
-                response_or_events = llm_call(messages_dicts, tools)
-
-                # Check if llm_call returns an async iterator (streaming) or a ChatResponse
-                if hasattr(response_or_events, '__aiter__'):
-                    # Streaming response - need to collect tool calls and execute them
-                    pending_tool_call: Optional[Dict[str, Any]] = None
-                    accumulated_args = ""
-                    completed_tool_calls: List[Dict[str, Any]] = []
-                    completed_tool_results: List[Dict[str, Any]] = []
-
-                    async for event in response_or_events:
-                        # Track tool call info during streaming
-                        if event.type == "tool_call_start":
-                            # New tool call starting - store the info
-                            tool_name = event.metadata.get("tool_name", "") if event.metadata else ""
-                            tool_call_id = event.metadata.get("tool_call_id", "") if event.metadata else ""
-                            # 从 metadata 获取初始 arguments（LLM 可能一次性返回完整参数）
-                            initial_args = event.metadata.get("arguments", "") if event.metadata else ""
-                            pending_tool_call = {
-                                "tool_name": tool_name,
-                                "tool_call_id": tool_call_id,
-                                "arguments": initial_args
-                            }
-                            accumulated_args = initial_args
-                            yield event
-
-                        elif event.type == "tool_call_argument":
-                            # Accumulate argument chunks
-                            arg_chunk = event.content if event.content else ""
-                            accumulated_args += arg_chunk
-                            if pending_tool_call:
-                                pending_tool_call["arguments"] = accumulated_args
-                            yield event
-
-                        elif event.type == "tool_call_end":
-                            # Tool call complete - execute the tool
-                            if pending_tool_call:
-                                tool_name = pending_tool_call["tool_name"]
-                                tool_call_id = pending_tool_call["tool_call_id"]
-                                tool_args_raw = pending_tool_call["arguments"]
-
-                                # Parse tool arguments
-                                try:
-                                    tool_args = json.loads(tool_args_raw) if tool_args_raw else {}
-                                except json.JSONDecodeError:
-                                    tool_args = {"input": tool_args_raw}
-
-                                yield Event(type="action", content=f"Calling {tool_name}...")
-
-                                # Execute tool if available
-                                if tool_name in tools:
-                                    tool = tools[tool_name]
-                                    try:
-                                        import asyncio
-                                        import inspect
-
-                                        is_async = inspect.iscoroutinefunction(tool.run)
-                                        session_id = ctx.session_id
-
-                                        if is_async:
-                                            # 使用 input 字段（如果有），否则使用整个 JSON 字符串
-                                            input_value = tool_args.get("input", tool_args_raw) if tool_args else tool_args_raw
-                                            result = await tool.run(input_value, session_id=session_id)
-                                        else:
-                                            input_value = tool_args.get("input", tool_args_raw) if tool_args else tool_args_raw
-                                            result = tool.run(input_value, session_id=session_id)
-
-                                        if not isinstance(result, str):
-                                            result = str(result)
-
-                                        # Collect tool result to add after assistant message (correct order)
-                                        completed_tool_results.append({
-                                            "tool_call_id": tool_call_id,
-                                            "content": result
-                                        })
-
-                                        yield Event(type="observation", content=result)
-
-                                    except Exception as e:
-                                        error_msg = f"Error executing tool {tool_name}: {e}"
-                                        logger.error(error_msg, exc_info=True)
-                                        completed_tool_results.append({
-                                            "tool_call_id": tool_call_id,
-                                            "content": f"Error: {error_msg}"
-                                        })
-                                        yield Event(type="error", content=error_msg)
-                                else:
-                                    error_msg = f"Unknown tool: {tool_name}"
-                                    logger.error(error_msg)
-                                    completed_tool_results.append({
-                                        "tool_call_id": tool_call_id,
-                                        "content": f"Error: {error_msg}"
-                                    })
-                                    yield Event(type="error", content=error_msg)
-
-                                # Track completed tool call for assistant message
-                                completed_tool_calls.append({
-                                    "tool_name": tool_name,
-                                    "tool_call_id": tool_call_id,
-                                    "arguments": tool_args_raw
-                                })
-
-                                pending_tool_call = None
-                            yield event
-
-                        else:
-                            yield event
-
-                        # Track if we received a final answer
-                        if event.type == "final_answer":
-                            return
-                        if event.type == "action":
-                            has_tool_calls = True
-                    # After streaming completes, check if we had tool calls
-                    # (has_tool_calls may have been set during tool execution)
-                    if not has_tool_calls and completed_tool_calls:
-                        has_tool_calls = True
-                    # After streaming completes, add assistant message with tool_calls
-                    if completed_tool_calls:
-                        tool_call_objects = [
-                            ToolCall(
-                                id=tc["tool_call_id"],
-                                type="function",
-                                function=FunctionCall(
-                                    name=tc["tool_name"],
-                                    arguments=tc["arguments"]
-                                )
-                            )
-                            for tc in completed_tool_calls
-                        ]
-                        messages.append(ChatMessage(
-                            role="assistant",
-                            content="",
-                            tool_calls=tool_call_objects
-                        ))
-                        # Add tool results AFTER assistant message (correct order)
-                        for tr in completed_tool_results:
-                            messages.append(ChatMessage(
-                                role="tool",
-                                content=tr["content"],
-                                tool_call_id=tr["tool_call_id"]
-                            ))
-                    # After streaming completes, continue to next iteration if needed
-                    if has_tool_calls:
-                        continue
-                    break
-                else:
-                    # Non-streaming response (ChatResponse)
-                    response = response_or_events
+                messages_dicts = [self._chat_message_to_dict(m) for m in ctx.messages]
+                response_or_events = llm_call(messages_dicts, ctx.tools)
+                # Await coroutines (async functions that return ChatResponse)
+                if asyncio.iscoroutine(response_or_events):
+                    response_or_events = await response_or_events
             except Exception as e:
                 logger.error(f"Error calling LLM: {e}", exc_info=True)
-                yield Event(type="error", content=f"LLM call failed: {e}")
+                yield Event(type=EventType.ERROR.value, content=f"LLM call failed: {e}")
                 break
 
-            # Handle response based on type
+            # Check if llm_call returns an async iterator (streaming) or a ChatResponse
+            if hasattr(response_or_events, '__aiter__'):
+                # Streaming response - use unified event processing
+                # Reset tool call tracking for this iteration
+                ctx.completed_tool_calls.clear()
+                ctx.completed_tool_results.clear()
+                ctx.clear_accumulated_text()
+
+                try:
+                    async for event in self._process_events(response_or_events, ctx):
+                        yield event
+                        if event.type == EventType.FINAL_ANSWER.value:
+                            return
+                except Exception as e:
+                    logger.error(f"Error during streaming: {e}", exc_info=True)
+                    yield Event(type=EventType.ERROR.value, content=f"LLM call failed: {e}")
+                    return
+
+                # After streaming completes, check if tool calls were executed
+                if not ctx.has_completed_tool_calls():
+                    # No tool calls - yield final_answer so frontend knows response is complete
+                    yield Event(type=EventType.FINAL_ANSWER.value, content="")
+                    return
+
+                # Tool calls were executed - add assistant message with tool_calls
+                tool_call_objects = [
+                    ToolCall(
+                        id=tc["tool_call_id"],
+                        type="function",
+                        function=FunctionCall(
+                            name=tc["tool_name"],
+                            arguments=tc["arguments"]
+                        )
+                    )
+                    for tc in ctx.completed_tool_calls
+                ]
+                ctx.messages.append(ChatMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=tool_call_objects
+                ))
+                # Add tool results AFTER assistant message (correct order)
+                for tr in ctx.completed_tool_results:
+                    ctx.messages.append(ChatMessage(
+                        role="tool",
+                        content=tr["content"],
+                        tool_call_id=tr["tool_call_id"]
+                    ))
+                # Continue to next iteration to get LLM's response to tool results
+                continue
+            else:
+                # Non-streaming response (ChatResponse)
+                response = response_or_events
+
+            # Handle ChatResponse
             if isinstance(response, ChatResponse):
-                # Modern format with ChatResponse
-                async for event in self._handle_chat_response(response, messages, iteration):
+                has_tool_calls_in_response = False
+                async for event in self._handle_chat_response(response, ctx):
                     yield event
-                    if event.type == "final_answer":
-                        # Final answer received, exit loop
+                    if event.type == EventType.FINAL_ANSWER.value:
                         return
-                    if event.type == "action":
-                        # Tool execution in progress
-                        has_tool_calls = True
+                    if event.type == EventType.ACTION.value:
+                        has_tool_calls_in_response = True
+                # Use tool_calls presence as sole indicator to continue
+                if has_tool_calls_in_response:
+                    continue
+                # No tool calls and no final_answer - shouldn't happen but handle gracefully
+                break
             elif isinstance(response, str):
                 # Legacy string format - yield as text token and continue
-                yield Event(type="text_token", content=response)
+                yield Event(type=EventType.TEXT_TOKEN.value, content=response)
             else:
                 logger.warning(f"Unexpected response type from llm_call: {type(response)}")
 
         # Check if max iterations reached
-        if iteration >= self.max_iterations:
-            warning_msg = f"ToolCall loop reached maximum iterations ({self.max_iterations}) without final answer"
+        if ctx.is_max_iterations_reached():
+            warning_msg = f"ToolCall loop reached maximum iterations ({ctx.max_iterations}) without final answer"
             logger.warning(warning_msg)
-            yield Event(type="error", content=warning_msg)
+            yield Event(type=EventType.ERROR.value, content=warning_msg)
 
     async def _handle_chat_response(
         self,
         response: ChatResponse,
-        messages: List[ChatMessage],
-        iteration: int
+        ctx: PlannerContext,
     ) -> AsyncIterator[Event]:
         """Handle a ChatResponse from LLM.
 
+        使用 PlannerContext 替代多个参数：
+        - ctx.messages: 消息列表
+        - ctx.tools: 工具字典
+        - ctx.session_id: 会话 ID
+        - ctx.iteration: 当前迭代次数
+
         Args:
             response: The ChatResponse from LLM.
-            messages: Current messages array (will be modified by adding tool results).
-            iteration: Current iteration number.
+            ctx: PlannerContext containing all planner state.
 
         Yields:
             Event objects based on response content and tool calls.
         """
         if response.has_tool_calls:
             # Add assistant message with tool calls to messages
-            messages.append(ChatMessage(
+            ctx.messages.append(ChatMessage(
                 role="assistant",
                 content=response.content,
                 tool_calls=response.tool_calls
@@ -295,159 +391,92 @@ class ToolCallPlanner(BasePlanner):
             # Execute each tool call and add results to messages
             for tool_call in response.tool_calls:
                 tool_name = tool_call.function.name
+                tool_call_id = tool_call.id
                 tool_args_raw = tool_call.function.arguments
 
-                yield Event(type="action", content=f"Calling {tool_name}...")
+                yield Event(type=EventType.ACTION.value, content=f"Calling {tool_name}...")
                 logger.debug(f"Tool call: {tool_name} with args: {tool_args_raw}")
 
-                # Parse tool arguments
-                try:
-                    tool_args = json.loads(tool_args_raw) if tool_args_raw else {}
-                except json.JSONDecodeError:
-                    tool_args = {"input": tool_args_raw}
+                # Execute tool via PlannerContext
+                result = await ctx.execute_tool(tool_name, tool_args_raw)
 
-                # Get tools from the tools_ref set during _build_messages
-                # We need to pass tools through - let's get it from self
-                tools = getattr(self, '_tools_ref', {})
+                # Add tool result message
+                ctx.messages.append(ChatMessage(
+                    role="tool",
+                    content=result,
+                    tool_call_id=tool_call_id
+                ))
 
-                # Execute tool if available
-                if tool_name not in tools:
-                    error_msg = f"Unknown tool: {tool_name}"
-                    logger.error(error_msg, exc_info=True)
-                    messages.append(ChatMessage(
-                        role="tool",
-                        content=f"Error: {error_msg}",
-                        tool_call_id=tool_call.id
-                    ))
-                    yield Event(type="error", content=error_msg)
-                    continue
-
-                tool = tools[tool_name]
-
-                # Execute the tool
-                try:
-                    import asyncio
-                    import inspect
-
-                    is_async = inspect.iscoroutinefunction(tool.run)
-                    session_id = getattr(self, '_session_id_ref', '')
-
-                    if is_async:
-                        input_value = tool_args.get("input", tool_args_raw) if tool_args else tool_args_raw
-                        result = await tool.run(input_value, session_id=session_id)
-                    else:
-                        input_value = tool_args.get("input", tool_args_raw) if tool_args else tool_args_raw
-                        result = tool.run(input_value, session_id=session_id)
-
-                    if not isinstance(result, str):
-                        result = str(result)
-
-                    logger.debug(f"Tool {tool_name} result: {result[:100]}...")
-
-                    # Add tool result message to messages
-                    messages.append(ChatMessage(
-                        role="tool",
-                        content=result,
-                        tool_call_id=tool_call.id
-                    ))
-
-                    yield Event(type="observation", content=result)
-
-                except Exception as e:
-                    error_msg = f"Error executing tool {tool_name}: {e}"
-                    logger.error(error_msg, exc_info=True)
-
-                    messages.append(ChatMessage(
-                        role="tool",
-                        content=f"Error: {error_msg}",
-                        tool_call_id=tool_call.id
-                    ))
-                    yield Event(type="error", content=error_msg)
+                yield Event(type=EventType.OBSERVATION.value, content=result)
 
         elif response.content:
             # No tool calls - this is the final answer
-            yield Event(type="final_answer", content=response.content)
-            logger.debug(f"ToolCall planner completed with final answer at iteration {iteration}")
+            yield Event(type=EventType.FINAL_ANSWER.value, content=response.content)
+            logger.debug(f"ToolCall planner completed with final answer at iteration {ctx.iteration}")
 
             # Add assistant message to messages
-            messages.append(ChatMessage(role="assistant", content=response.content))
+            ctx.messages.append(ChatMessage(role="assistant", content=response.content))
 
-    async def _build_messages(
+    async def _build_system_message(
         self,
-        ctx: SessionContext,
-        memory: BaseMemory,
-        tools: Dict[str, Any]
-    ) -> List[ChatMessage]:
-        """Build the messages array for the chat completions API.
+        ctx: PlannerContext,
+    ) -> ChatMessage:
+        """构建 system 消息。
 
-        Constructs a messages array that includes:
-        - System message with tool definitions
-        - Memory context as a preceding user message
-        - Conversation history from ctx.messages
+        返回单个 system 消息，内容包括：
+        - 工具定义
+        - 记忆上下文
+
+        使用 PlannerContext 替代多个参数：
+        - ctx.memory: 记忆系统
+        - ctx.tools: 工具字典
+        - ctx.session_id: 会话 ID
+
+        注意：原版 _build_system_message 从 SessionContext.messages 中获取最新用户消息
+        用于记忆检索。重构后 PlannerContext.messages 初始为空，记忆检索需要
+        调用方确保 ctx 中有原始会话消息（通过 PlannerContext.session_messages
+        或在调用 _build_system_message 前设置 ctx.messages）。
 
         Args:
-            ctx: Current session context.
-            memory: Memory system for retrieving relevant context.
-            tools: Dictionary of available tools.
+            ctx: PlannerContext containing all planner state.
 
         Returns:
-            List of ChatMessage objects ready for API call.
+            ChatMessage object with role="system".
         """
-        messages: List[ChatMessage] = []
-
-        # Store tools and session_id reference for use in _handle_chat_response
-        self._tools_ref = tools
-        self._session_id_ref = ctx.session_id
-
         # Build system message with tools
-        system_content = self._build_system_message(tools)
-        messages.append(ChatMessage(role="system", content=system_content))
+        system_content = self._build_system_message_content(ctx.tools)
 
-        # Retrieve memory context and add as user message
+        # Retrieve memory context and inject into system message (I7)
+        memory_context = ""
         try:
-            if ctx.messages:
+            if ctx.memory:
                 latest_user_msg = None
+                # 从 ctx.messages 中查找最新用户消息（用于记忆检索）
+                # 注意：首次调用时 ctx.messages 可能为空，记忆检索会被跳过
+                # 调用方应确保在 plan_and_act 调用前设置 ctx.messages
                 for msg in reversed(ctx.messages):
                     if msg.role == "user":
                         latest_user_msg = msg.content
                         break
 
                 if latest_user_msg:
-                    memory_context = await memory.retrieve(
+                    # 注意：原版使用 ctx.participants 作为 user_ids 参数
+                    # PlannerContext 暂无 participants 字段，传 None
+                    # TODO: 后续需要在 PlannerContext 中添加 participants 支持
+                    memory_context = await ctx.memory.retrieve(
                         ctx.session_id,
                         latest_user_msg,
-                        user_ids=ctx.participants
+                        user_ids=None  # 原版: ctx.participants
                     )
-                    if memory_context:
-                        context_msg = ChatMessage(
-                            role="user",
-                            content=f"Relevant context:\n{memory_context}"
-                        )
-                        messages.append(context_msg)
         except Exception as e:
             logger.warning(f"Failed to retrieve memory context: {e}")
 
-        # Add conversation history (skip system, keep user/assistant/tool)
-        if ctx.messages:
-            for msg in ctx.messages[-10:]:
-                if msg.role == "system":
-                    continue
-                elif msg.role == "tool":
-                    messages.append(ChatMessage(
-                        role="tool",
-                        content=msg.content,
-                        tool_call_id=getattr(msg, 'tool_call_id', None)
-                    ))
-                elif msg.role in ("user", "assistant"):
-                    messages.append(ChatMessage(
-                        role=msg.role,
-                        content=msg.content,
-                        name=getattr(msg, 'sender_id', None)
-                    ))
+        if memory_context:
+            system_content += f"\n\n## Relevant Context from Memory\n{memory_context}"
 
-        return messages
+        return ChatMessage(role="system", content=system_content)
 
-    def _build_system_message(self, tools: Dict[str, Any]) -> str:
+    def _build_system_message_content(self, tools: Dict[str, Any]) -> str:
         """Build the system message content with tool instructions.
 
         Args:
@@ -457,7 +486,7 @@ class ToolCallPlanner(BasePlanner):
             Formatted system message string.
         """
         parts = [
-            "You are a helpful assistant that can use tools to answer questions.",
+            "You are a helpful assistant.",
             "",
         ]
 
@@ -470,39 +499,6 @@ class ToolCallPlanner(BasePlanner):
             parts.append("")
 
         return "\n".join(parts)
-
-    async def _build_prompt(
-        self,
-        ctx: SessionContext,
-        memory: BaseMemory,
-        tools: Dict[str, Any]
-    ) -> str:
-        """Build legacy prompt string (for backward compatibility).
-
-        Deprecated: Use _build_messages instead for modern chat completions API.
-
-        Args:
-            ctx: Current session context.
-            memory: Memory system for retrieving relevant context.
-            tools: Dictionary of available tools.
-
-        Returns:
-            Formatted prompt string.
-        """
-        messages = await self._build_messages(ctx, memory, tools)
-        prompt_parts = []
-
-        for msg in messages:
-            if msg.role == "system":
-                prompt_parts.append(f"System: {msg.content}")
-            elif msg.role == "user":
-                prompt_parts.append(f"User: {msg.content}")
-            elif msg.role == "assistant":
-                prompt_parts.append(f"Assistant: {msg.content}")
-            elif msg.role == "tool":
-                prompt_parts.append(f"Tool Result: {msg.content}")
-
-        return "\n\n".join(prompt_parts)
 
     def _chat_message_to_dict(self, msg: ChatMessage) -> Dict[str, Any]:
         """Convert a ChatMessage to a dictionary for JSON serialization.
@@ -531,49 +527,6 @@ class ToolCallPlanner(BasePlanner):
                 for tc in msg.tool_calls
             ]
         return result
-
-    def _parse_action(self, text: str):
-        """Parse legacy action format (for backward compatibility).
-
-        Deprecated: With modern ChatResponse format, parsing is handled
-        by extracting content/tool_calls from the response object.
-
-        Args:
-            text: Text to parse.
-
-        Returns:
-            Action object (for backward compatibility only).
-        """
-        from dataclasses import dataclass
-
-        @dataclass
-        class LegacyAction:
-            type: str
-            tool: Optional[str] = None
-            input: Optional[str] = None
-            content: Optional[str] = None
-
-        import re
-        text = text.strip()
-
-        if not text:
-            return LegacyAction(type="final_answer", content="")
-
-        # Check for final answer
-        final_answer_match = re.search(r'Final Answer:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-        if final_answer_match:
-            return LegacyAction(type="final_answer", content=final_answer_match.group(1).strip())
-
-        # Check for action
-        action_match = re.search(r'Action:\s*(\S+)', text, re.IGNORECASE)
-        if action_match:
-            tool_name = action_match.group(1).strip()
-            input_match = re.search(r'Action Input:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-            input_str = input_match.group(1).strip() if input_match else ""
-            return LegacyAction(type="tool_call", tool=tool_name, input=input_str)
-
-        # Default to thought
-        return LegacyAction(type="thought", content=text)
 
 
 # Backward compatibility alias - OLD NAME: ToolCallPlanner

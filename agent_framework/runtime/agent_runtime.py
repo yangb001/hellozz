@@ -15,6 +15,7 @@ from ..interfaces.base_planner import BasePlanner
 from ..interfaces.enums import EventType
 from ..interfaces.llm_types import ChatResponse as PlannerChatResponse, ToolCall as PlannerToolCall, FunctionCall
 from ..infrastructure.llm_gateway import StreamChatResponse, ChatResponseType
+from ..core.planner_context import PlannerContext
 
 
 def _tools_to_schemas(tools: Dict[str, Any]) -> List[Dict]:
@@ -111,6 +112,14 @@ class AgentRuntime:
                         metadata={"chunk_index": 0}
                     )
 
+                # Handle reasoning/thinking content
+                if hasattr(chunk, 'type') and chunk.type == ChatResponseType.REASONING_CONTENT:
+                    yield Event(
+                        type=EventType.THINKING_CONTENT,
+                        content=chunk.content,
+                        metadata={}
+                    )
+
                 # Handle tool call events
                 if hasattr(chunk, 'tool_call') and chunk.tool_call:
                     tc = chunk.tool_call
@@ -175,8 +184,15 @@ class AgentRuntime:
                         metadata={"finish_reason": chunk.finish_reason}
                     )
 
-        # Step 4: Run planner and yield events
-        async for event in planner.plan_and_act(ctx, memory, tools, llm_call):
+        # Step 4: Create PlannerContext and run planner
+        planner_ctx = PlannerContext(
+            session_id=ctx.session_id,
+            tools=tools,
+            messages=list(ctx.messages),
+            memory=memory
+        )
+
+        async for event in planner.plan_and_act(planner_ctx, llm_call):
             # Step 5: If final answer, save to context and memory
             if event.type == "final_answer":
                 assistant_msg = Message(role="assistant", content=event.content)

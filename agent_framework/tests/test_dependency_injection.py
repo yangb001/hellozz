@@ -271,23 +271,13 @@ class TestPlannerDependencies:
     async def test_planner_receives_llm_call(self):
         """Test planner receives llm_call function."""
         from agent_framework.planners.react_planner import ReActPlanner
+        from agent_framework.interfaces.llm_types import ChatResponse
 
         planner = ReActPlanner()
 
-        # Track received llm_call
-        received_llm_call = None
-
-        # Override _build_prompt to avoid complexity
-        original_build_prompt = planner._build_prompt
-
-        async def mock_build_prompt(ctx, memory, tools):
-            return "test prompt"
-
-        planner._build_prompt = mock_build_prompt
-
-        # Create mock llm_call
-        async def mock_llm_call(prompt):
-            yield "Final Answer: test response"
+        # Create mock llm_call that returns a ChatResponse
+        def mock_llm_call(messages, tools):
+            return ChatResponse(content="test response")
 
         # Create context
         ctx = MagicMock()

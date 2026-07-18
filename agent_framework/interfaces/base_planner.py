@@ -2,8 +2,6 @@
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, Dict, Any
 
-from .session import SessionContext
-from .base_memory import BaseMemory
 from .events import Event
 
 
@@ -12,6 +10,10 @@ class BasePlanner(ABC):
 
     A planner is responsible for deciding the next action(s) the agent
     should take based on the current context, memory, and available tools.
+
+    After refactoring (Phase 2A), the planner uses PlannerContext to bundle
+    all state (session_id, tools, memory, messages) into a single context object,
+    reducing the number of parameters and eliminating side effects.
     """
 
     name: str = ""
@@ -23,18 +25,15 @@ class BasePlanner(ABC):
     @abstractmethod
     async def plan_and_act(
         self,
-        ctx: SessionContext,
-        memory: BaseMemory,
-        tools: Dict[str, Any],
+        ctx: Any,
         llm_call: callable,
     ) -> AsyncIterator[Event]:
         """Execute planning-action loop, yielding events.
 
         Args:
-            ctx: Current session context with messages and state.
-            memory: Memory system for retrieving relevant context.
-            tools: Dictionary of available tools by name.
-            llm_call: Async callable that takes a prompt and yields response tokens.
+            ctx: PlannerContext containing all planner state (session_id, tools,
+                 memory, messages, iteration tracking, etc.).
+            llm_call: Async callable that takes (messages, tools) and yields events.
 
         Yields:
             Event objects representing thoughts, actions, observations, and final answer.

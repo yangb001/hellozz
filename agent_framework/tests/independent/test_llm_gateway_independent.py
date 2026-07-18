@@ -18,7 +18,12 @@ from dataclasses import FrozenInstanceError
 from enum import Enum
 from typing import AsyncIterator, Dict, List, Optional, get_type_hints
 
-from infrastructure.llm_gateway import LLMConfig, LLMGateway, LLMProvider
+from infrastructure.llm_gateway import (
+    LLMConfig, LLMGateway, LLMProvider,
+    ChatResponse as LLMChatResponse,
+    StreamChatResponse, ChatResponseType,
+)
+from interfaces.llm_types import ToolCall, FunctionCall
 
 
 # ============================================================================
@@ -358,6 +363,12 @@ class TestLLMGatewayAbstractClass:
             async def stream(self, prompt, model="default", **kwargs):
                 yield ""
 
+            async def chat(self, messages, tools=None, model="default", **kwargs):
+                return LLMChatResponse(content="")
+
+            async def stream_chat(self, messages, tools=None, model="default", **kwargs):
+                yield StreamChatResponse(type=ChatResponseType.DONE)
+
             async def count_tokens(self, text):
                 return 0
 
@@ -389,6 +400,30 @@ class MockLLMGateway(LLMGateway):
         config = self.get_config(model)
         for word in f"Mock streamed response from {config.model}".split():
             yield word + " "
+
+    async def chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> LLMChatResponse:
+        self.call_log.append({"method": "chat", "messages": messages, "model": model})
+        config = self.get_config(model)
+        return LLMChatResponse(content=f"Mock chat response from {config.model}")
+
+    async def stream_chat(
+        self,
+        messages: List[Dict],
+        tools: Optional[List[Dict]] = None,
+        model: str = "default",
+        **kwargs
+    ) -> AsyncIterator[StreamChatResponse]:
+        self.call_log.append({"method": "stream_chat", "messages": messages, "model": model})
+        config = self.get_config(model)
+        for word in f"Mock streamed chat from {config.model}".split():
+            yield StreamChatResponse(type=ChatResponseType.CONTENT, content=word + " ")
+        yield StreamChatResponse(type=ChatResponseType.DONE)
 
     async def count_tokens(self, text: str) -> int:
         self.call_log.append({"method": "count_tokens", "text": text})

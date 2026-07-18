@@ -1,12 +1,10 @@
-"""Tests for ModernReActPlanner - Updated implementation.
+"""Tests for ToolCallPlanner - Updated implementation.
 
-NOTE: This test file was updated to match the ModernReAct implementation.
+NOTE: This test file was updated to match the ToolCallPlanner implementation.
 The old Action-based tests have been replaced with ToolCall-based tests.
 
-If you're looking for the old-style ReAct tests, they have been moved to
-test_react_planner_legacy.py or deleted.
-
-Reference: ModernReAct uses chat completions API with tool_calls support.
+Reference: ToolCallPlanner uses chat completions API with tool_calls support
+and PlannerContext for explicit state management.
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,8 +14,9 @@ from agent_framework.interfaces.session import SessionContext, Message
 from agent_framework.interfaces.base_memory import BaseMemory
 from agent_framework.interfaces.base_tool import BaseTool
 from agent_framework.interfaces.events import Event
-from agent_framework.planners.react_planner import ReActPlanner, ChatMessage, ChatResponse
+from agent_framework.planners.react_planner import ToolCallPlanner, ReActPlanner, ChatMessage, ChatResponse
 from agent_framework.interfaces.llm_types import ToolCall, FunctionCall
+from agent_framework.core.planner_context import PlannerContext
 
 
 class TestToolCall:
@@ -115,39 +114,39 @@ class TestReActPlanner:
 
     @pytest.fixture
     def planner(self):
-        """Create a ReActPlanner instance."""
-        return ReActPlanner()
+        """Create a ToolCallPlanner instance."""
+        return ToolCallPlanner()
 
     def test_planner_initialization(self, planner):
-        """Test ReActPlanner initialization."""
-        assert planner.name == "react"
-        assert "ReAct" in planner.description
+        """Test ToolCallPlanner initialization."""
+        assert planner.name == "tool_call"
+        assert "Tool-call" in planner.description
         assert planner.max_iterations == 10
 
     def test_planner_custom_name(self):
-        """Test ReActPlanner with custom name."""
-        planner = ReActPlanner(name="custom_react", description="Custom ReAct planner", max_iterations=5)
-        assert planner.name == "custom_react"
-        assert planner.description == "Custom ReAct planner"
+        """Test ToolCallPlanner with custom name."""
+        planner = ToolCallPlanner(name="custom_planner", description="Custom planner", max_iterations=5)
+        assert planner.name == "custom_planner"
+        assert planner.description == "Custom planner"
         assert planner.max_iterations == 5
 
     @pytest.mark.asyncio
-    async def test_build_messages_basic(self, planner, session_context, mock_memory, mock_tools):
-        """Test _build_messages creates proper messages array."""
-        messages = await planner._build_messages(session_context, mock_memory, mock_tools)
+    async def test_build_system_message_basic(self, planner, mock_memory, mock_tools):
+        """Test _build_system_message returns ChatMessage using PlannerContext."""
+        ctx = PlannerContext(
+            session_id="test-session-123",
+            tools=mock_tools,
+            memory=mock_memory
+        )
+        msg = await planner._build_system_message(ctx)
 
-        assert isinstance(messages, list)
-        assert len(messages) > 0
-        # First message should be from system or user
-        assert messages[0]["role"] in ["system", "user"]
+        assert isinstance(msg, ChatMessage)
+        assert msg.role == "system"
 
-    @pytest.mark.asyncio
-    async def test_build_tools_dict(self, planner, mock_tools):
-        """Test _build_tools_dict creates proper OpenAI tools format."""
-        tools = planner._build_tools_dict(mock_tools)
+    def test_build_system_message_content(self, planner, mock_tools):
+        """Test _build_system_message_content creates proper system message string with tool info."""
+        system_msg = planner._build_system_message_content(mock_tools)
 
-        assert isinstance(tools, list)
-        assert len(tools) == 1
-        assert tools[0]["type"] == "function"
-        assert "function" in tools[0]
-        assert tools[0]["function"]["name"] == "test_tool"
+        assert isinstance(system_msg, str)
+        assert "test_tool" in system_msg
+        assert "A test tool" in system_msg

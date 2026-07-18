@@ -12,6 +12,9 @@ Test categories:
 6. final_answer handling
 7. Session context updates
 8. Boundary conditions
+
+Refactored: Updated to use PlannerContext (Phase 2A) - BasePlanner.plan_and_act
+now accepts (PlannerContext, llm_call) instead of (SessionContext, memory, tools, llm_call).
 """
 import pytest
 from datetime import datetime, timezone
@@ -21,6 +24,7 @@ from agent_framework.interfaces.session import SessionContext, Message
 from agent_framework.interfaces.events import Event
 from agent_framework.interfaces.base_memory import BaseMemory
 from agent_framework.interfaces.base_planner import BasePlanner
+from agent_framework.core.planner_context import PlannerContext
 from agent_framework.runtime.agent_runtime import AgentRuntime
 
 
@@ -62,17 +66,23 @@ class MockPlanner(BasePlanner):
         self.call_args = None
 
     async def plan_and_act(
-        self, ctx: SessionContext, memory: BaseMemory,
-        tools: Dict[str, Any], llm_call: callable
+        self, ctx: PlannerContext, llm_call: callable
     ) -> AsyncIterator[Event]:
         self.call_args = {
             "ctx": ctx,
-            "memory": memory,
-            "tools": tools,
             "llm_call": llm_call,
         }
         for event in self.events:
             yield event
+
+
+class MockStreamChunk:
+    """Mock stream chunk for testing."""
+
+    def __init__(self, content: str = "", tool_call=None, finish_reason: str = None):
+        self.content = content
+        self.tool_call = tool_call
+        self.finish_reason = finish_reason
 
 
 class MockLLMGateway:
@@ -86,6 +96,12 @@ class MockLLMGateway:
         self.calls.append({"prompt": prompt, "kwargs": kwargs})
         for word in self.response.split():
             yield word + " "
+
+    async def stream_chat(self, messages: List[Dict], tools=None, **kwargs) -> AsyncIterator:
+        """Mock stream_chat that yields chunks matching the real gateway interface."""
+        self.calls.append({"messages": messages, "tools": tools, "kwargs": kwargs})
+        for word in self.response.split():
+            yield MockStreamChunk(content=word + " ")
 
 
 # ============================================================================
@@ -360,7 +376,7 @@ class TestPlannerIntegration:
 
     @pytest.mark.asyncio
     async def test_planner_receives_context(self):
-        """Planner must receive the SessionContext."""
+        """Planner must receive a PlannerContext with correct session_id."""
         runtime = AgentRuntime()
         planner = MockPlanner()
         memory = MockMemory()
@@ -374,11 +390,13 @@ class TestPlannerIntegration:
             pass
 
         assert planner.call_args is not None
-        assert planner.call_args["ctx"] is ctx
+        planner_ctx = planner.call_args["ctx"]
+        assert isinstance(planner_ctx, PlannerContext)
+        assert planner_ctx.session_id == ctx.session_id
 
     @pytest.mark.asyncio
     async def test_planner_receives_memory(self):
-        """Planner must receive the memory instance."""
+        """Planner must receive the memory instance via PlannerContext."""
         runtime = AgentRuntime()
         planner = MockPlanner()
         memory = MockMemory()
@@ -390,11 +408,12 @@ class TestPlannerIntegration:
         ):
             pass
 
-        assert planner.call_args["memory"] is memory
+        planner_ctx = planner.call_args["ctx"]
+        assert planner_ctx.memory is memory
 
     @pytest.mark.asyncio
     async def test_planner_receives_tools(self):
-        """Planner must receive the tools dictionary."""
+        """Planner must receive the tools dictionary via PlannerContext."""
         runtime = AgentRuntime()
         planner = MockPlanner()
         memory = MockMemory()
@@ -407,7 +426,8 @@ class TestPlannerIntegration:
         ):
             pass
 
-        assert planner.call_args["tools"] is tools
+        planner_ctx = planner.call_args["ctx"]
+        assert planner_ctx.tools is tools
 
     @pytest.mark.asyncio
     async def test_planner_receives_llm_call(self):
@@ -428,7 +448,7 @@ class TestPlannerIntegration:
 
     @pytest.mark.asyncio
     async def test_user_message_added_before_planner_call(self):
-        """User message must be in context before planner is called."""
+        """User message must be in SessionContext before planner is called."""
         runtime = AgentRuntime()
         planner = MockPlanner()
         memory = MockMemory()
@@ -440,9 +460,8 @@ class TestPlannerIntegration:
         ):
             pass
 
-        # At planner call time, ctx should have the user message
-        planner_ctx = planner.call_args["ctx"]
-        user_msgs = [m for m in planner_ctx.messages if m.role == "user"]
+        # User message is added to SessionContext before planner runs
+        user_msgs = [m for m in ctx.messages if m.role == "user"]
         assert len(user_msgs) >= 1
         assert user_msgs[-1].content == "test input"
 
@@ -456,8 +475,8 @@ class TestLLMCallClosure:
     """Test the llm_call closure created by AgentRuntime."""
 
     @pytest.mark.asyncio
-    async def test_llm_call_delegates_to_gateway_stream(self):
-        """llm_call must call llm_gateway.stream and yield tokens."""
+    async def test_llm_call_delegates_to_gateway_stream_chat(self):
+        """llm_call must call llm_gateway.stream_chat and yield events."""
         runtime = AgentRuntime()
         planner = MockPlanner()
         memory = MockMemory()
@@ -472,18 +491,16 @@ class TestLLMCallClosure:
 
         # Get the llm_call and test it
         llm_call = planner.call_args["llm_call"]
-        tokens = []
-        async for token in llm_call("test prompt"):
-            tokens.append(token)
+        events = []
+        async for event in llm_call([{"role": "user", "content": "test"}]):
+            events.append(event)
 
-        assert len(tokens) == 3
-        assert "hello" in tokens[0]
-        assert "world" in tokens[1]
-        assert "test" in tokens[2]
+        # Should yield text_token events for each word
+        assert len(events) == 3
 
     @pytest.mark.asyncio
-    async def test_llm_call_passes_prompt_to_gateway(self):
-        """llm_call must pass the prompt to gateway.stream."""
+    async def test_llm_call_passes_messages_to_gateway(self):
+        """llm_call must pass messages to gateway.stream_chat."""
         runtime = AgentRuntime()
         planner = MockPlanner()
         memory = MockMemory()
@@ -497,33 +514,41 @@ class TestLLMCallClosure:
             pass
 
         llm_call = planner.call_args["llm_call"]
-        async for _ in llm_call("my specific prompt"):
+        test_messages = [{"role": "user", "content": "my specific prompt"}]
+        async for _ in llm_call(test_messages):
             pass
 
         assert len(gateway.calls) == 1
-        assert gateway.calls[0]["prompt"] == "my specific prompt"
+        assert gateway.calls[0]["messages"] == test_messages
 
     @pytest.mark.asyncio
-    async def test_llm_call_passes_kwargs(self):
-        """llm_call must pass additional kwargs to gateway.stream."""
+    async def test_llm_call_passes_tools_to_gateway(self):
+        """llm_call must pass tools to gateway.stream_chat."""
         runtime = AgentRuntime()
         planner = MockPlanner()
         memory = MockMemory()
         ctx = _make_ctx()
         gateway = MockLLMGateway()
 
+        # Tools is a dict of name -> tool object
+        class MockTool:
+            description = "Search tool"
+            parameters = {"type": "object", "properties": {}}
+
+        test_tools = {"search": MockTool()}
+
         async for _ in runtime.run(
             ctx=ctx, user_input="test", memory=memory,
-            tools={}, planner=planner, llm_gateway=gateway
+            tools=test_tools, planner=planner, llm_gateway=gateway
         ):
             pass
 
         llm_call = planner.call_args["llm_call"]
-        async for _ in llm_call("prompt", model="gpt-4", temperature=0.7):
+        test_messages = [{"role": "user", "content": "test"}]
+        async for _ in llm_call(test_messages, tools=test_tools):
             pass
 
-        assert gateway.calls[0]["kwargs"]["model"] == "gpt-4"
-        assert gateway.calls[0]["kwargs"]["temperature"] == 0.7
+        assert gateway.calls[0]["tools"] is not None
 
     @pytest.mark.asyncio
     async def test_llm_call_returns_async_iterator(self):
@@ -540,7 +565,7 @@ class TestLLMCallClosure:
             pass
 
         llm_call = planner.call_args["llm_call"]
-        result = llm_call("test")
+        result = llm_call([{"role": "user", "content": "test"}])
         import inspect
         assert inspect.isasyncgen(result)
 

@@ -123,28 +123,18 @@ class OpenAILLM(LLMGateway):
             )
         return self._client
 
-    def _build_payload(
-        self,
-        prompt: str,
-        stream: bool = False,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """Build the request payload for OpenAI API.
+    def _apply_optional_params(self, payload: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+        """Apply optional parameters (temperature, max_tokens, etc.) to a payload dict.
+
+        Merges config defaults with per-request kwargs overrides.
 
         Args:
-            prompt: The input prompt.
-            stream: Whether to stream the response.
-            **kwargs: Additional parameters.
+            payload: The base payload dict to augment.
+            **kwargs: Per-request parameter overrides.
 
         Returns:
-            Dictionary payload for the API request.
+            The augmented payload dict (mutated in place and returned).
         """
-        payload = {
-            "model": self._config.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": stream,
-        }
-
         # Add temperature (from config or kwargs)
         temperature = kwargs.get("temperature", self._config.temperature)
         if temperature is not None:
@@ -166,6 +156,29 @@ class OpenAILLM(LLMGateway):
             payload["stop"] = kwargs["stop"]
 
         return payload
+
+    def _build_payload(
+        self,
+        prompt: str,
+        stream: bool = False,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """Build the request payload for OpenAI API.
+
+        Args:
+            prompt: The input prompt.
+            stream: Whether to stream the response.
+            **kwargs: Additional parameters.
+
+        Returns:
+            Dictionary payload for the API request.
+        """
+        payload = {
+            "model": self._config.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": stream,
+        }
+        return self._apply_optional_params(payload, **kwargs)
 
     def _build_chat_payload(
         self,
@@ -195,27 +208,7 @@ class OpenAILLM(LLMGateway):
         if tools:
             payload["tools"] = tools
 
-        # Add temperature (from config or kwargs)
-        temperature = kwargs.get("temperature", self._config.temperature)
-        if temperature is not None:
-            payload["temperature"] = temperature
-
-        # Add max_tokens (from config or kwargs)
-        max_tokens = kwargs.get("max_tokens", self._config.max_tokens)
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
-
-        # Add other optional parameters
-        if "top_p" in kwargs:
-            payload["top_p"] = kwargs["top_p"]
-        if "frequency_penalty" in kwargs:
-            payload["frequency_penalty"] = kwargs["frequency_penalty"]
-        if "presence_penalty" in kwargs:
-            payload["presence_penalty"] = kwargs["presence_penalty"]
-        if "stop" in kwargs:
-            payload["stop"] = kwargs["stop"]
-
-        return payload
+        return self._apply_optional_params(payload, **kwargs)
 
     async def _call_openai_api(
         self,
@@ -308,7 +301,22 @@ class OpenAILLM(LLMGateway):
             message = choice.get("message", {})
 
             content = message.get("content", "")
-            tool_calls = message.get("tool_calls", None)
+
+            # Parse raw tool_calls dicts into ToolCall objects
+            raw_tool_calls = message.get("tool_calls", None)
+            tool_calls = None
+            if raw_tool_calls:
+                tool_calls = [
+                    ToolCall(
+                        id=tc.get("id", ""),
+                        type=tc.get("type", "function"),
+                        function=FunctionCall(
+                            name=tc.get("function", {}).get("name", ""),
+                            arguments=tc.get("function", {}).get("arguments", "")
+                        )
+                    )
+                    for tc in raw_tool_calls
+                ]
 
             return ChatResponse(content=content, tool_calls=tool_calls)
 
@@ -449,6 +457,13 @@ class OpenAILLM(LLMGateway):
                                 yield StreamChatResponse(
                                     type=ChatResponseType.CONTENT,
                                     content=delta["content"]
+                                )
+
+                            # Yield reasoning/thinking content (e.g., MiniMax, OpenAI o1)
+                            if delta.get("reasoning_content"):
+                                yield StreamChatResponse(
+                                    type=ChatResponseType.REASONING_CONTENT,
+                                    content=delta["reasoning_content"]
                                 )
 
                             # Process tool_calls

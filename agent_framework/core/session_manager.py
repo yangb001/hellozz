@@ -129,7 +129,7 @@ class SessionManager:
                     async for event in events:
                         await result_holder.put(event)
                         await self.event_bus.publish(sid, event)
-                    result_holder.put(None)  # End signal
+                    await result_holder.put(None)  # End signal
                 else:
                     # Batch mode: collect all events
                     collected = []
@@ -144,7 +144,7 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"Error processing message in session {sid}: {e}", exc_info=True)
                 if is_stream_mode:
-                    result_holder.put(None)  # End signal on error
+                    await result_holder.put(None)  # End signal on error
                 else:
                     result_holder.set_exception(e)
 
