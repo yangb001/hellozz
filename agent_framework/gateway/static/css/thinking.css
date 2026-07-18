@@ -1,0 +1,221 @@
+/* Thinking Component Styles */
+
+/* Thinking container */
+.thinking-container {
+  margin: 12px 0;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  transition: all 0.3s ease;
+}
+
+.thinking-container:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+/* Thinking header */
+.thinking-header {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ec 100%);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.thinking-header:hover {
+  background: linear-gradient(135deg, #e8ecf0 0%, #dce0e4 100%);
+}
+
+/* Thinking icon */
+.thinking-icon {
+  font-size: 18px;
+  margin-right: 10px;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Thinking title */
+.thinking-title {
+  flex: 1;
+  font-weight: 600;
+  color: #333;
+  font-size: 14px;
+}
+
+/* Thinking duration */
+.thinking-duration {
+  font-size: 12px;
+  color: #666;
+  margin-right: 12px;
+  padding: 2px 8px;
+  background: rgba(0,0,0,0.05);
+  border-radius: 10px;
+}
+
+/* Toggle arrow */
+.thinking-toggle {
+  font-size: 12px;
+  color: #666;
+  transition: transform 0.3s ease;
+  display: inline-block;
+}
+
+.thinking-toggle.expanded {
+  transform: rotate(90deg);
+}
+
+/* Thinking content area */
+.thinking-content {
+  padding: 12px 16px;
+  background: #fafbfc;
+  max-height: 400px;
+  overflow-y: auto;
+  display: none;
+}
+
+.thinking-content.visible {
+  display: block;
+}
+
+/* Thinking step */
+.thinking-step {
+  margin: 12px 0;
+  padding: 12px;
+  background: white;
+  border-radius: 6px;
+  border-left: 4px solid #4CAF50;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  transition: all 0.2s;
+}
+
+.thinking-step:first-child {
+  margin-top: 0;
+}
+
+.thinking-step:last-child {
+  margin-bottom: 0;
+}
+
+.thinking-step:hover {
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.thinking-step.active {
+  border-left-color: #2196F3;
+  background: #f8f9ff;
+}
+
+/* Step header */
+.step-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+/* Step number */
+.step-number {
+  font-weight: 700;
+  color: #4CAF50;
+  margin-right: 10px;
+  font-size: 13px;
+  min-width: 50px;
+}
+
+/* Step label */
+.step-label {
+  font-weight: 600;
+  color: #333;
+  flex: 1;
+  font-size: 13px;
+}
+
+/* Step duration */
+.step-duration {
+  font-size: 11px;
+  color: #999;
+  padding: 2px 6px;
+  background: #f0f0f0;
+  border-radius: 8px;
+}
+
+/* Step content */
+.step-content {
+  color: #555;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  background: #f8f8f8;
+  padding: 8px;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+/* Loading animation */
+.thinking-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.thinking-loading .dot {
+  width: 6px;
+  height: 6px;
+  background: #666;
+  border-radius: 50%;
+  animation: bounce 1.4s infinite ease-in-out both;
+}
+
+.thinking-loading .dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.thinking-loading .dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: scale(0);
+  }
+  40% {
+    transform: scale(1);
+  }
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .thinking-header {
+    padding: 10px 12px;
+  }
+
+  .thinking-content {
+    padding: 10px 12px;
+  }
+
+  .thinking-step {
+    padding: 10px;
+  }
+
+  .step-header {
+    flex-wrap: wrap;
+  }
+
+  .step-number {
+    min-width: 40px;
+  }
+
+  .step-label {
+    flex-basis: 100%;
+    margin-top: 4px;
+  }
+}
