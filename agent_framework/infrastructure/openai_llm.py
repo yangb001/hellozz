@@ -452,18 +452,20 @@ class OpenAILLM(LLMGateway):
                             delta = choices[0].get("delta", {})
                             finish_reason = choices[0].get("finish_reason")
 
-                            # Yield content tokens
-                            if delta.get("content"):
+                            # Yield thinking content FIRST (兼容 MiniMax: reasoning_content, OpenAI: thinking_content)
+                            # 思考内容优先于普通content，因为MiniMax同一次返回中可能两者都有
+                            thinking = delta.get("reasoning_content") or delta.get("thinking_content")
+                            if thinking:
+                                yield StreamChatResponse(
+                                    type=ChatResponseType.THINKING_CONTENT,
+                                    content=thinking
+                                )
+                            # Yield content tokens only if no thinking content
+                            # (避免同一个chunk同时发送text_token和thinking_content导致重复)
+                            elif delta.get("content"):
                                 yield StreamChatResponse(
                                     type=ChatResponseType.CONTENT,
                                     content=delta["content"]
-                                )
-
-                            # Yield reasoning/thinking content (e.g., MiniMax, OpenAI o1)
-                            if delta.get("reasoning_content"):
-                                yield StreamChatResponse(
-                                    type=ChatResponseType.REASONING_CONTENT,
-                                    content=delta["reasoning_content"]
                                 )
 
                             # Process tool_calls

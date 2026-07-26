@@ -486,13 +486,40 @@ class ToolCallPlanner(BasePlanner):
             Formatted system message string.
         """
         parts = [
-            "You are a helpful assistant.",
+            "你是一个智能助手，既能认真解决问题，也能轻松聊天互动。",
+            "",
+            "## 意图识别",
+            "",
+            "根据用户消息判断意图：",
+            "- **问题/任务**：专注分析，提供准确、有条理的解答",
+            "- **闲聊/玩笑**：轻松回应，保持友好自然的对话氛围",
+            "",
+            "## 图片内容处理",
+            "",
+            "如果消息中包含【图片识别内容】标记，这是前端OCR识别的图片文字。请：",
+            "- 提取其中的关键信息（问题、数据、要点）",
+            "- 忽略格式标记和无关描述",
+            "- 将提取内容理解为用户的实际输入",
+            "",
+            "格式示例：",
+            "```",
+            "【图片识别内容】",
+            "识别出的文字内容...",
+            "【/图片识别内容】",
+            "```",
+            "",
+            "## 回复原则",
+            "",
+            "- 解答问题时：清晰准确，逻辑分明",
+            "- 闲聊互动时：自然友好，简洁不啰嗦",
+            "- 根据场景灵活切换风格",
             "",
         ]
 
         # Add available tools
         if tools:
-            parts.append("## Available Tools")
+            parts.append("## 可用工具")
+            parts.append("")
             for tool_name, tool in tools.items():
                 description = getattr(tool, 'description', 'No description available')
                 parts.append(f"- **{tool_name}**: {description}")

@@ -44,7 +44,7 @@ from agent_framework.interfaces.llm_types import FunctionCall, ToolCall, ChatRes
 class ChatResponseType(str, Enum):
     """Types of chat response events."""
     CONTENT = "content"           # Text content chunk
-    REASONING_CONTENT = "reasoning_content"  # Reasoning/thinking content chunk
+    THINKING_CONTENT = "thinking_content"  # Thinking content chunk (MiniMax: reasoning_content, OpenAI: thinking_content)
     TOOL_CALL_START = "tool_call_start"  # Tool call initiated
     TOOL_CALL_CHUNK = "tool_call_chunk"  # Tool call arguments chunk (legacy name)
     TOOL_CALL_ARGUMENT = "tool_call_argument"  # Tool call arguments chunk (preferred name)

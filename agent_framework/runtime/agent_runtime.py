@@ -104,20 +104,20 @@ class AgentRuntime:
             tools_schemas = _tools_to_schemas(tools) if tools else None
 
             async for chunk in llm_gateway.stream_chat(messages, tools=tools_schemas):
-                # Handle content tokens
-                if hasattr(chunk, 'content') and chunk.content:
-                    yield Event(
-                        type=EventType.TEXT_TOKEN,
-                        content=chunk.content,
-                        metadata={"chunk_index": 0}
-                    )
-
-                # Handle reasoning/thinking content
-                if hasattr(chunk, 'type') and chunk.type == ChatResponseType.REASONING_CONTENT:
+                # Handle thinking content FIRST (优先处理，避免与content重复)
+                if hasattr(chunk, 'type') and chunk.type == ChatResponseType.THINKING_CONTENT:
                     yield Event(
                         type=EventType.THINKING_CONTENT,
                         content=chunk.content,
                         metadata={}
+                    )
+                # Handle content tokens only when NOT thinking content
+                # (同一个chunk不会同时是THINKING_CONTENT和普通content)
+                elif hasattr(chunk, 'content') and chunk.content:
+                    yield Event(
+                        type=EventType.TEXT_TOKEN,
+                        content=chunk.content,
+                        metadata={"chunk_index": 0}
                     )
 
                 # Handle tool call events

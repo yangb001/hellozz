@@ -1,5 +1,40 @@
 /* Thinking Component Styles */
 
+/* Inline thinking container (inside message) */
+.thinking-inline {
+  margin-bottom: 8px;
+}
+
+.thinking-inline .thinking-container {
+  margin: 0;
+  border: 1px solid #e8e8e8;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.thinking-inline .thinking-header {
+  padding: 8px 12px;
+}
+
+.thinking-inline .thinking-content {
+  padding: 8px 12px;
+  max-height: 200px;
+}
+
+.thinking-inline .thinking-step {
+  margin: 8px 0;
+  padding: 8px;
+}
+
+/* Expanded state for inline thinking */
+.thinking-inline .thinking-container.expanded .thinking-content {
+  display: block;
+}
+
+.thinking-inline .thinking-container.expanded .thinking-toggle {
+  transform: rotate(90deg);
+}
+
 /* Thinking container */
 .thinking-container {
   margin: 12px 0;
@@ -83,6 +118,14 @@
 
 .thinking-content.visible {
   display: block;
+}
+
+.thinking-container.expanded .thinking-content {
+  display: block;
+}
+
+.thinking-container.expanded .thinking-toggle {
+  transform: rotate(90deg);
 }
 
 /* Thinking step */

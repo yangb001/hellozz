@@ -36,6 +36,13 @@ class LLMConfig:
 
 
 @dataclass
+class ServerConfig:
+    """Server configuration."""
+    host: str = "0.0.0.0"
+    port: int = 18433
+
+
+@dataclass
 class SQLiteConfig:
     """SQLite configuration."""
     path: str = "./data/sessions.db"
@@ -45,6 +52,16 @@ class SQLiteConfig:
 class PlannerConfig:
     """Planner configuration."""
     type: str = "planners.react_planner.ReActPlanner"
+
+
+@dataclass
+class ToolsConfig:
+    """Tools subsystem configuration.
+
+    Attributes:
+        enabled: List of enabled tool names. If empty, all tools are enabled.
+    """
+    enabled: list = field(default_factory=list)
 
 
 @dataclass
@@ -77,12 +94,15 @@ class Config:
         memory: Memory subsystem configuration
         llm: LLM gateway configuration
         planner: Planner configuration
+        tools: Tools configuration
         logging: Logging subsystem configuration
     """
+    server: ServerConfig = field(default_factory=ServerConfig)
     sqlite: SQLiteConfig = field(default_factory=SQLiteConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -115,6 +135,9 @@ class Config:
                 },
             },
             "planner": self.planner.type,
+            "tools": {
+                "enabled": self.tools.enabled,
+            },
             "logging": {
                 "level": self.logging.level,
                 "log_dir": self.logging.log_dir,
@@ -173,12 +196,18 @@ def load_config(config_path: Optional[str] = None) -> Config:
     else:
         data = {}
 
+    server_data = data.get("server", {})
     sqlite_data = data.get("sqlite", {})
     memory_data = data.get("memory", {})
     llm_data = data.get("llm", {})
     planner_data = data.get("planner", "")
 
     extraction_data = memory_data.get("extraction", {})
+
+    server_config = ServerConfig(
+        host=server_data.get("host", "0.0.0.0"),
+        port=server_data.get("port", 18433)
+    )
 
     sqlite_config = SQLiteConfig(
         path=sqlite_data.get("path", "./data/sessions.db")
@@ -207,6 +236,11 @@ def load_config(config_path: Optional[str] = None) -> Config:
         type=planner_data or "planners.react_planner.ReActPlanner"
     )
 
+    tools_data = data.get("tools", {})
+    tools_config = ToolsConfig(
+        enabled=tools_data.get("enabled", [])
+    )
+
     logging_data = data.get("logging", {})
     logging_config = LoggingConfig(
         level=logging_data.get("level", "INFO"),
@@ -218,10 +252,12 @@ def load_config(config_path: Optional[str] = None) -> Config:
     )
 
     config = Config(
+        server=server_config,
         sqlite=sqlite_config,
         memory=memory_config,
         llm=llm_config,
         planner=planner_config,
+        tools=tools_config,
         logging=logging_config,
     )
 

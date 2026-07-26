@@ -414,7 +414,6 @@
         </div>
 
         <div id="chatContent">
-            <div id="thinking-container"></div>
             <div class="empty-state">
                 <svg viewBox="0 0 24 24" fill="currentColor">
                     <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/>
@@ -524,11 +523,6 @@
             finalizeStreaming();
             streamingContentPreserved = '';
 
-            // Clear thinking component
-            if (thinkingComponent) {
-                thinkingComponent.clear();
-            }
-
             // Update UI
             document.getElementById('chatHeader').style.display = 'flex';
             document.getElementById('inputArea').style.display = 'block';
@@ -560,15 +554,12 @@
         // Render messages
         function renderMessages(messages) {
             const container = document.getElementById('chatContent');
-            container.innerHTML = '<div id="thinking-container"></div><div class="chat-messages" id="messageList"></div>';
+            container.innerHTML = '<div class="chat-messages" id="messageList"></div>';
 
             const list = document.getElementById('messageList');
             messages.forEach(msg => {
                 appendMessage(msg.role, msg.content, msg.timestamp);
             });
-
-            // Re-initialize thinking component with new container
-            thinkingComponent = new ThinkingComponent('thinking-container');
 
             scrollToBottom();
         }
@@ -636,6 +627,53 @@
         let currentToolCall = null;
         let toolCallElement = null;
 
+        // Thinking state - per-message thinking content
+        let currentThinkingSteps = [];
+        let currentThinkingStep = null;
+        let thinkingStartTime = null;
+        let currentThinkingComponent = null;
+
+        // Handle thinking event - add to current streaming message
+        function handleThinkingEvent(event) {
+            if (!event || !event.type) return;
+
+            // Ensure streaming message exists
+            if (!streamingElement) {
+                console.debug('[WS Client] Creating new streaming element for thinking');
+                hideTypingIndicator();
+                streamingElement = createStreamingMessage();
+            }
+
+            // Get or create thinking container in streaming message
+            let thinkingContainer = streamingElement.querySelector('.thinking-inline');
+            if (!thinkingContainer) {
+                thinkingContainer = document.createElement('div');
+                thinkingContainer.className = 'thinking-inline';
+                streamingElement.insertBefore(thinkingContainer, streamingElement.firstChild);
+            }
+
+            // Create ThinkingComponent if not exists
+            if (!currentThinkingComponent || currentThinkingComponent.container !== thinkingContainer) {
+                currentThinkingComponent = new ThinkingComponent(thinkingContainer);
+            }
+
+            // Handle event
+            currentThinkingComponent.handleEvent(event);
+        }
+
+        // Finalize thinking component - collapse and detach
+        function finalizeThinking() {
+            if (currentThinkingComponent) {
+                // End any active thinking step (this will collapse the thinking box)
+                currentThinkingComponent.endThinking();
+                // Detach from streaming state
+                currentThinkingComponent = null;
+            }
+            currentThinkingSteps = [];
+            currentThinkingStep = null;
+            thinkingStartTime = null;
+        }
+
         // Handle stream end - unified logic for WebSocket close/error only
         // This is a safety net: if the connection drops before final_answer arrives,
         // we still show whatever content was accumulated during streaming.
@@ -680,6 +718,12 @@
             if (data.type === 'text_token') {
                 // Streaming token - accumulate and display incrementally
                 console.debug('[WS Client] text_token received:', data.content);
+
+                // Finalize thinking when first text token arrives
+                if (currentThinkingComponent) {
+                    finalizeThinking();
+                }
+
                 if (!streamingElement) {
                     console.debug('[WS Client] Creating new streaming element');
                     hideTypingIndicator();
@@ -692,12 +736,20 @@
             }
 
             if (data.type === 'final_answer' || data.type === 'response') {
-                finalizeStreaming();
+                if (streamingElement) {
+                    // Streaming element exists - update content and finalize in place
+                    const bubble = streamingElement.querySelector('.message-bubble');
+                    if (bubble && data.content) {
+                        bubble.textContent = data.content;
+                    }
+                    finalizeStreaming();
+                } else {
+                    // No streaming element - create new message
+                    const finalContent = streamingContentPreserved || data.content;
+                    streamingContentPreserved = '';
+                    appendMessage('assistant', finalContent, data.timestamp);
+                }
                 finalizeReasoning();
-                // Use preserved streaming content if available, otherwise use data.content
-                const finalContent = streamingContentPreserved || data.content;
-                streamingContentPreserved = ''; // Clear preserved content
-                appendMessage('assistant', finalContent, data.timestamp);
                 isProcessing = false;
                 updateSendButton();
                 hideTypingIndicator();
@@ -719,8 +771,8 @@
                 console.log('Agent action:', data.content);
             } else if (data.type === 'observation') {
                 console.log('Observation:', data.content);
-            } else if (data.type === 'reasoning_content') {
-                appendReasoningContent(data.content);
+            } else if (data.type === 'thinking_content') {
+                handleThinkingEvent(data);
             } else if (data.type === 'tool_call_start') {
                 currentToolCall = {
                     id: data.metadata?.tool_call_id || data.tool_call_id || '',
@@ -760,6 +812,13 @@
                 <div class="message-meta">正在输入...</div>
             `;
             list.appendChild(div);
+
+            // Reset thinking state for new message
+            currentThinkingSteps = [];
+            currentThinkingStep = null;
+            thinkingStartTime = null;
+            currentThinkingComponent = null;
+
             scrollToBottom();
             return div;
         }
@@ -774,14 +833,21 @@
             }
         }
 
-        // Finalize streaming message - preserve content before removing
+        // Finalize streaming message - convert to final message
         function finalizeStreaming() {
             if (streamingElement) {
                 const bubble = streamingElement.querySelector('.message-bubble');
                 if (bubble) {
                     streamingContentPreserved = bubble.textContent || streamingContent;
                 }
-                streamingElement.remove();
+                // Remove streaming-specific attributes and styling
+                streamingElement.removeAttribute('id');
+                const meta = streamingElement.querySelector('.message-meta');
+                if (meta) {
+                    meta.textContent = formatTime(new Date().toISOString());
+                }
+                // Detach thinking component but keep the content
+                finalizeThinking();
                 streamingElement = null;
                 streamingContent = '';
             }

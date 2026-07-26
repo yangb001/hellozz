@@ -56,6 +56,8 @@ def build_session_manager() -> SessionManager:
     Returns:
         Configured SessionManager instance.
     """
+    logger = get_logger("agent_framework.gateway")
+
     # Load configuration
     config = load_config("config.json")
 
@@ -96,10 +98,23 @@ def build_session_manager() -> SessionManager:
         config=memory_config,
     )
 
-    # Create Tools
+    # Create Tools - register based on config
     tool_registry = ToolRegistry()
-    tool_registry.register(Calculator())
-    tool_registry.register(WebSearch())
+    enabled_tools = config.tools.enabled  # List of enabled tool names, empty means all
+
+    # Available tools mapping
+    available_tools = {
+        "calculator": Calculator,
+        "web_search": WebSearch,
+    }
+
+    # Register tools based on config
+    for tool_name, tool_class in available_tools.items():
+        if not enabled_tools or tool_name in enabled_tools:
+            tool_registry.register(tool_class())
+            logger.info(f"Registered tool: {tool_name}")
+        else:
+            logger.debug(f"Skipped tool (disabled): {tool_name}")
 
     # Create Planner
     planner = ReActPlanner()
@@ -222,3 +237,15 @@ def create_app() -> FastAPI:
 
 # Create the application instance
 app = create_app()
+
+if __name__ == "__main__":
+    import uvicorn
+    from ..core.config import load_config
+
+    config = load_config("config.json")
+    uvicorn.run(
+        "agent_framework.gateway.main:app",
+        host=config.server.host,
+        port=config.server.port,
+        reload=True
+    )

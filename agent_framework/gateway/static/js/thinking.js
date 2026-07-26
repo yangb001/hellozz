@@ -6,21 +6,24 @@
  * - Multi-step display
  * - Duration statistics
  * - Real-time updates
+ *
+ * Each instance is associated with a specific message.
  */
 class ThinkingComponent {
   /**
    * Create thinking component
-   * @param {string} containerId - Container element ID
+   * @param {HTMLElement} container - Container element (not ID)
    */
-  constructor(containerId) {
-    this.container = document.getElementById(containerId);
+  constructor(container) {
+    this.container = container;
     this.steps = [];
     this.currentStep = null;
     this.isVisible = false;
     this.startTime = null;
+    this.isStreaming = false; // Track if currently receiving content
 
     if (!this.container) {
-      console.error(`Thinking container not found: ${containerId}`);
+      console.error('Thinking container element not provided');
     }
   }
 
@@ -60,8 +63,13 @@ class ThinkingComponent {
    * @returns {Object} Current thinking step
    */
   addContent(content) {
+    if (!this.currentStep) {
+      // Auto-create a step if none exists (handles missing thinking_start events)
+      this.startThinking('Thinking...');
+    }
     if (this.currentStep) {
       this.currentStep.content += content;
+      this.isStreaming = true; // Mark as streaming
       this.render();
     }
     return this.currentStep;
@@ -77,6 +85,7 @@ class ThinkingComponent {
       this.currentStep.duration = this.currentStep.endTime - this.currentStep.startTime;
       this.steps.push(this.currentStep);
       this.currentStep = null;
+      this.isStreaming = false; // Mark as not streaming
       this.render();
     }
     return this.steps[this.steps.length - 1];
@@ -111,6 +120,7 @@ class ThinkingComponent {
    */
   toggle() {
     this.isVisible = !this.isVisible;
+    // Don't change isStreaming, just toggle visibility
     this.render();
   }
 
@@ -142,6 +152,14 @@ class ThinkingComponent {
   }
 
   /**
+   * Check if has content
+   * @returns {boolean} True if has any steps
+   */
+  hasContent() {
+    return this.steps.length > 0 || this.currentStep !== null;
+  }
+
+  /**
    * Render component
    */
   render() {
@@ -149,6 +167,7 @@ class ThinkingComponent {
 
     if (this.steps.length === 0 && !this.currentStep) {
       this.container.innerHTML = '';
+      this.container.style.display = 'none';
       return;
     }
 
@@ -159,26 +178,29 @@ class ThinkingComponent {
     const totalDuration = this.getTotalDuration();
     const stepCount = this.getStepCount();
 
+    // Determine if should be expanded (streaming or user toggled)
+    const isExpanded = this.isStreaming || this.isVisible;
+
     const html = `
-      <div class="thinking-container">
-        <div class="thinking-header" onclick="thinkingComponent.toggle()">
+      <div class="thinking-container ${isExpanded ? 'expanded' : ''}">
+        <div class="thinking-header" onclick="this.parentElement.classList.toggle('expanded');this.nextElementSibling.classList.toggle('visible')">
           <span class="thinking-icon">💭</span>
-          <span class="thinking-title">Thinking Process (${stepCount} steps)</span>
+          <span class="thinking-title">思考过程 (${stepCount} 步)</span>
           <span class="thinking-duration">${(totalDuration / 1000).toFixed(1)}s</span>
-          <span class="thinking-toggle ${this.isVisible ? 'expanded' : ''}">&#9654;</span>
+          <span class="thinking-toggle">&#9654;</span>
         </div>
-        <div class="thinking-content ${this.isVisible ? 'visible' : ''}">
+        <div class="thinking-content ${isExpanded ? 'visible' : ''}">
           ${allSteps.map(step => `
             <div class="thinking-step ${step === this.currentStep ? 'active' : ''}">
               <div class="step-header">
                 <span class="step-number">Step ${step.step}</span>
-                <span class="step-label">${step.label || 'Thinking...'}</span>
+                <span class="step-label">${step.label || '思考中...'}</span>
                 ${step.duration
                   ? `<span class="step-duration">${(step.duration / 1000).toFixed(1)}s</span>`
                   : '<span class="thinking-loading"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>'
                 }
               </div>
-              <div class="step-content">${step.content || '...'}</div>
+              <div class="step-content">${this.escapeHtml(step.content) || '...'}</div>
             </div>
           `).join('')}
         </div>
@@ -186,6 +208,19 @@ class ThinkingComponent {
     `;
 
     this.container.innerHTML = html;
+    this.container.style.display = 'block';
+  }
+
+  /**
+   * Escape HTML to prevent XSS
+   * @param {string} text - Text to escape
+   * @returns {string} Escaped text
+   */
+  escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   /**
@@ -234,31 +269,7 @@ class ThinkingComponent {
   }
 }
 
-// Global instance
-let thinkingComponent = null;
-
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
-  thinkingComponent = new ThinkingComponent('thinking-container');
-});
-
-/**
- * Handle thinking event (global function)
- * @param {Object} event - Event object
- */
-function handleThinkingEvent(event) {
-  if (!thinkingComponent) {
-    thinkingComponent = new ThinkingComponent('thinking-container');
-  }
-  thinkingComponent.handleEvent(event);
-}
-
-/**
- * Toggle thinking content display (global function)
- * @param {HTMLElement} header - Header element
- */
-function toggleThinking(header) {
-  if (thinkingComponent) {
-    thinkingComponent.toggle();
-  }
+// Export for use in other modules
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = ThinkingComponent;
 }
