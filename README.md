@@ -74,6 +74,7 @@ source .venv/bin/activate
 
 # 安装依赖
 python -m pip install -e ".[dev]" --trusted-host mirrors.tools.huawei.com -i https://mirrors.tools.huawei.com/pypi/simple
+python -m pip install --force-reinstall pydantic pydantic-core pydantic-settings --trusted-host mirrors.tools.huawei.com -i https://mirrors.tools.huawei.com/pypi/simple
 ```
 
 ### 2. 配置

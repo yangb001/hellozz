@@ -1,13 +1,17 @@
 # Core Dependencies
-pydantic>=2.0
-pyyaml>=6.0
-aiosqlite>=0.19.0
+pydantic==2.13.4
+aiosqlite==0.22.1
 
 # Web Framework
-fastapi>=0.100
-uvicorn>=0.23
-httpx>=0.24
+fastapi==0.139.0
+uvicorn==0.51.0
+httpx==0.28.1
 
 # Testing
-pytest>=8.0
-anyio>=4.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+anyio==4.14.1
+
+# Optional: Vector Database (if needed)
+# lancedb>=0.4.0
+# sentence-transformers>=2.2.0
